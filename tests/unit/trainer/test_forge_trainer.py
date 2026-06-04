@@ -30,6 +30,7 @@ from amzn_nova_forge.manager.runtime_manager import (
     SMHPRuntimeManager,
     SMTJRuntimeManager,
 )
+from amzn_nova_forge.monitor.mlflow_monitor import MLflowMonitor
 from amzn_nova_forge.trainer.forge_trainer import ForgeTrainer
 
 FIXED_OUTPUT_PATH = "s3://sagemaker-nova-123456789012-us-east-1/output"
@@ -1247,6 +1248,421 @@ class TestForgeTrainerGetConfig(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             trainer.get_config()
         self.assertIn("rft_multiturn_infra", str(ctx.exception))
+
+
+class TestForgeTrainerModelArn(unittest.TestCase):
+    """Tests for model_arn parameter on ForgeTrainer for SMTJServerless."""
+
+    MOCK_MODEL_PACKAGE_ARN = "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1"
+
+    def _make_serverless_infra(self):
+        from amzn_nova_forge.manager.runtime_manager import SMTJServerlessRuntimeManager
+
+        infra = create_autospec(SMTJServerlessRuntimeManager)
+        infra.instance_type = None
+        infra.instance_count = None
+        infra.kms_key_id = None
+        infra.platform = Platform.SMTJServerless
+        infra.rft_lambda_arn = None
+        infra.hub_content_version = None
+        return infra
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_model_arn_accepted_for_serverless(self, mock_session, _mock_output):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+            model_arn=self.MOCK_MODEL_PACKAGE_ARN,
+        )
+
+        self.assertEqual(trainer.model_arn, self.MOCK_MODEL_PACKAGE_ARN)
+        self.assertIsNone(trainer.model_s3_path)
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_model_s3_path_migrated_to_model_arn_for_serverless(self, mock_session, _mock_output):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+            model_s3_path=self.MOCK_MODEL_PACKAGE_ARN,
+        )
+
+        self.assertEqual(trainer.model_arn, self.MOCK_MODEL_PACKAGE_ARN)
+        self.assertIsNone(trainer.model_s3_path)
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_both_model_arn_and_model_s3_path_raises(self, mock_session, _mock_output):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        with self.assertRaises(ValueError) as ctx:
+            ForgeTrainer(
+                model=Model.NOVA_LITE_2,
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                infra=infra,
+                training_data_s3_path="s3://bucket/data",
+                model_s3_path=self.MOCK_MODEL_PACKAGE_ARN,
+                model_arn=self.MOCK_MODEL_PACKAGE_ARN,
+            )
+        self.assertIn("Cannot specify both", str(ctx.exception))
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_model_arn_invalid_raises(self, mock_session, _mock_output):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        with self.assertRaises(ValueError) as ctx:
+            ForgeTrainer(
+                model=Model.NOVA_LITE_2,
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                infra=infra,
+                training_data_s3_path="s3://bucket/data",
+                model_arn="s3://bucket/not-an-arn/",
+            )
+        self.assertIn("model_arn must be a SageMaker model package ARN", str(ctx.exception))
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_no_model_arn_trains_from_base(self, mock_session, _mock_output):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+        )
+
+        self.assertIsNone(trainer.model_arn)
+        self.assertIsNone(trainer.model_s3_path)
+
+
+class TestForgeTrainerMTRLTrain(unittest.TestCase):
+    """Tests for the MTRL serverless training path in ForgeTrainer.train()."""
+
+    MOCK_MLFLOW_ARN = "arn:aws:sagemaker:us-east-1:123456789012:mlflow-tracking-server/my-server"
+
+    def _make_serverless_infra(self):
+        from amzn_nova_forge.manager.runtime_manager import SMTJServerlessRuntimeManager
+
+        infra = create_autospec(SMTJServerlessRuntimeManager)
+        infra.instance_type = None
+        infra.instance_count = None
+        infra.kms_key_id = None
+        infra.platform = Platform.SMTJServerless
+        infra.rft_lambda_arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/agent"
+        infra.hub_content_version = None
+        infra.execute_mtrl.return_value = "mtrl-job-id-123"
+        return infra
+
+    def _make_mlflow_config(self):
+        mock_monitor = MagicMock(spec=MLflowMonitor)
+        mock_monitor.tracking_uri = self.MOCK_MLFLOW_ARN
+        return ForgeConfig(mlflow_monitor=mock_monitor)
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_mtrl_train_raises_without_mlflow_config(self, mock_session, _mock_output):
+        """AgentRFT jobs must have an MLflow config; raise ValueError if missing."""
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            trainer.train(job_name="my-mtrl-job")
+        self.assertIn("MLflow configuration is required", str(ctx.exception))
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_mtrl_train_raises_without_mlflow_tracking_uri(self, mock_session, _mock_output):
+        """AgentRFT jobs must have a tracking_uri; raise ValueError if None."""
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        mock_monitor = MagicMock(spec=MLflowMonitor)
+        mock_monitor.tracking_uri = None
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+            config=ForgeConfig(mlflow_monitor=mock_monitor),
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            trainer.train(job_name="my-mtrl-job")
+        self.assertIn("MLflow configuration is required", str(ctx.exception))
+
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_mtrl_train_raises_for_rft_multiturn_full_without_mlflow(
+        self, mock_session, _mock_output
+    ):
+        """RFT_MULTITURN_FULL also requires MLflow config."""
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_FULL,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            trainer.train(job_name="my-mtrl-full-job")
+        self.assertIn("MLflow configuration is required", str(ctx.exception))
+
+    @patch("amzn_nova_forge.trainer.forge_trainer.get_model_artifacts")
+    @patch("amzn_nova_forge.trainer.forge_trainer.persist_result")
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_mtrl_serverless_train_returns_smtj_training_result(
+        self, mock_session, _mock_output, mock_persist, mock_get_artifacts
+    ):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        mock_get_artifacts.return_value = ModelArtifacts(
+            output_s3_path="s3://bucket/output/",
+            output_model_arn=None,
+        )
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+            config=self._make_mlflow_config(),
+        )
+
+        with patch("amzn_nova_forge.trainer.forge_trainer.SMTJTrainingResult") as MockResult:
+            mock_result_instance = MagicMock()
+            mock_result_instance.job_id = "mtrl-job-id-123"
+            mock_result_instance.model_artifacts = ModelArtifacts(
+                output_s3_path="s3://bucket/output/"
+            )
+            MockResult.return_value = mock_result_instance
+
+            result = trainer.train(job_name="my-mtrl-job")
+
+        infra.execute_mtrl.assert_called_once()
+        call_kwargs = infra.execute_mtrl.call_args[1]
+        self.assertEqual(call_kwargs["model"], Model.NOVA_LITE_2)
+        self.assertEqual(call_kwargs["data_s3_path"], "s3://bucket/data")
+        self.assertEqual(call_kwargs["output_s3_path"], FIXED_OUTPUT_PATH)
+        self.assertIsNone(call_kwargs["model_path"])
+        self.assertEqual(result, mock_result_instance)
+
+    @patch("amzn_nova_forge.trainer.forge_trainer.get_model_artifacts")
+    @patch("amzn_nova_forge.trainer.forge_trainer.persist_result")
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_mtrl_serverless_train_passes_model_arn(
+        self, mock_session, _mock_output, mock_persist, mock_get_artifacts
+    ):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+        model_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/grp/1"
+
+        mock_get_artifacts.return_value = ModelArtifacts(
+            output_s3_path="s3://bucket/output/",
+            output_model_arn=None,
+        )
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+            model_arn=model_arn,
+            config=self._make_mlflow_config(),
+        )
+
+        with patch("amzn_nova_forge.trainer.forge_trainer.SMTJTrainingResult") as MockResult:
+            mock_result_instance = MagicMock()
+            mock_result_instance.job_id = "mtrl-job-id-456"
+            mock_result_instance.model_artifacts = ModelArtifacts(
+                output_s3_path="s3://bucket/output/"
+            )
+            MockResult.return_value = mock_result_instance
+
+            trainer.train(job_name="my-iterative-job")
+
+        call_kwargs = infra.execute_mtrl.call_args[1]
+        self.assertEqual(call_kwargs["model_path"], model_arn)
+
+    @patch("amzn_nova_forge.trainer.forge_trainer.get_model_artifacts")
+    @patch("amzn_nova_forge.trainer.forge_trainer.persist_result")
+    @patch(
+        "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+        return_value=FIXED_OUTPUT_PATH,
+    )
+    @patch("boto3.session.Session")
+    def test_mtrl_serverless_train_passes_overrides(
+        self, mock_session, _mock_output, mock_persist, mock_get_artifacts
+    ):
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        infra = self._make_serverless_infra()
+
+        mock_get_artifacts.return_value = ModelArtifacts(
+            output_s3_path="s3://bucket/output/",
+        )
+
+        trainer = ForgeTrainer(
+            model=Model.NOVA_LITE_2,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            infra=infra,
+            training_data_s3_path="s3://bucket/data",
+            config=self._make_mlflow_config(),
+        )
+
+        with patch("amzn_nova_forge.trainer.forge_trainer.SMTJTrainingResult") as MockResult:
+            mock_result_instance = MagicMock()
+            mock_result_instance.job_id = "mtrl-job-id-789"
+            mock_result_instance.model_artifacts = ModelArtifacts(
+                output_s3_path="s3://bucket/output/"
+            )
+            MockResult.return_value = mock_result_instance
+
+            trainer.train(
+                job_name="my-overrides-job",
+                overrides={"global_batch_size": 16, "max_steps": 50},
+            )
+
+        call_kwargs = infra.execute_mtrl.call_args[1]
+        self.assertEqual(call_kwargs["overrides"], {"global_batch_size": 16, "max_steps": 50})
+
+
+class TestForgeTrainerGetLogsMTRL(unittest.TestCase):
+    """Tests for ForgeTrainer.get_logs() with MTRL SMTJTrainingResult."""
+
+    def _make_trainer(self):
+        from amzn_nova_forge.manager.runtime_manager import SMTJServerlessRuntimeManager
+
+        infra = create_autospec(SMTJServerlessRuntimeManager)
+        infra.instance_type = None
+        infra.instance_count = None
+        infra.kms_key_id = None
+        infra.platform = Platform.SMTJServerless
+        infra.rft_lambda_arn = None
+        infra.hub_content_version = None
+
+        with (
+            patch(
+                "amzn_nova_forge.trainer.forge_trainer.set_output_s3_path",
+                return_value=FIXED_OUTPUT_PATH,
+            ),
+            patch("boto3.session.Session") as mock_session,
+        ):
+            type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+            return ForgeTrainer(
+                model=Model.NOVA_LITE_2,
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                infra=infra,
+                training_data_s3_path="s3://bucket/data",
+            )
+
+    @patch("amzn_nova_forge.trainer.forge_trainer.CloudWatchLogMonitor")
+    def test_get_logs_mtrl_delegates_to_wait(self, MockMonitor):
+        """When job_result is an MTRL SMTJTrainingResult, get_logs() should call wait() instead of streaming CloudWatch logs."""
+        trainer = self._make_trainer()
+
+        mock_result = MagicMock(spec=SMTJTrainingResult)
+        mock_result._is_mtrl = True
+        mock_result.job_id = "mtrl-job-abc"
+        mock_result.started_time = datetime(2025, 5, 1, tzinfo=timezone.utc)
+
+        trainer.get_logs(job_result=mock_result)
+
+        # Should call wait() on the job_result
+        mock_result.wait.assert_called_once_with(poll=30, timeout=7200)
+        # Should NOT create a CloudWatch monitor
+        MockMonitor.assert_not_called()
+
+    @patch("amzn_nova_forge.trainer.forge_trainer.CloudWatchLogMonitor")
+    def test_get_logs_mtrl_passes_custom_poll_and_timeout(self, MockMonitor):
+        """MTRL get_logs() should pass through custom poll and timeout values."""
+        trainer = self._make_trainer()
+
+        mock_result = MagicMock(spec=SMTJTrainingResult)
+        mock_result._is_mtrl = True
+        mock_result.job_id = "mtrl-job-def"
+        mock_result.started_time = datetime(2025, 5, 1, tzinfo=timezone.utc)
+
+        trainer.get_logs(job_result=mock_result, poll=60, timeout=7200)
+
+        mock_result.wait.assert_called_once_with(poll=60, timeout=7200)
+        MockMonitor.assert_not_called()
+
+    @patch("amzn_nova_forge.trainer.forge_trainer.CloudWatchLogMonitor")
+    def test_get_logs_non_mtrl_smtj_result_still_streams_cloudwatch(self, MockMonitor):
+        """Non-MTRL SMTJTrainingResult should still stream CloudWatch logs normally."""
+        trainer = self._make_trainer()
+
+        mock_result = MagicMock(spec=SMTJTrainingResult)
+        mock_result._is_mtrl = False
+        mock_result.job_id = "smtj-job-xyz"
+        mock_result.started_time = datetime(2025, 5, 1, tzinfo=timezone.utc)
+
+        trainer.get_logs(job_result=mock_result)
+
+        # Should NOT call wait()
+        mock_result.wait.assert_not_called()
+        # Should create a CloudWatch monitor
+        MockMonitor.assert_called_once()
+        MockMonitor.return_value.show_logs.assert_called_once()
 
 
 if __name__ == "__main__":

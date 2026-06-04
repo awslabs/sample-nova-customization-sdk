@@ -47,6 +47,9 @@ from amzn_nova_forge.core.result.job_result import (
     JobStatusManager as JobStatusManager,
 )
 from amzn_nova_forge.core.result.job_result import (
+    MTRLStatusManager as MTRLStatusManager,
+)
+from amzn_nova_forge.core.result.job_result import (
     SMHPStatusManager as SMHPStatusManager,
 )
 from amzn_nova_forge.core.result.job_result import (

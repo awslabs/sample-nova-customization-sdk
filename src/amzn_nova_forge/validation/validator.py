@@ -859,6 +859,12 @@ class Validator:
             elif rft_lambda_arn is not None and not is_lambda_arn(rft_lambda_arn):
                 if is_hub_content_arn(rft_lambda_arn) and platform == Platform.SMTJServerless:
                     pass  # valid — hub-content ARN used as EvaluatorArn on SMTJServerless
+                elif (
+                    platform == Platform.SMTJServerless
+                    and method == TrainingMethod.RFT_MULTITURN_LORA
+                    and rft_lambda_arn.startswith("arn:")
+                ):
+                    pass  # valid — AgentCore runtime ARN for serverless multiturn
                 else:
                     errors.append(
                         "'rft_lambda_arn' must be a valid Lambda function ARN"
@@ -962,6 +968,8 @@ class Validator:
 
         if method in [TrainingMethod.RFT_LORA, TrainingMethod.RFT_FULL]:
             validate_rft(rft_lambda_arn=rft_lambda_arn, rft_lambda_source=rft_lambda_source)
+        elif method == TrainingMethod.RFT_MULTITURN_LORA and platform == Platform.SMTJServerless:
+            pass  # MTRL serverless uses agent_core_arn — no Lambda required
         elif method in [TrainingMethod.EVALUATION]:
             assert eval_task is not None
             validate_eval(
@@ -972,9 +980,19 @@ class Validator:
                 rl_env_config=rl_env_config,
             )
 
+        # MTRL serverless jobs use the SDK's own validation (FineTuningOptions).
+        # The JumpStart overrides template has constraints for single-turn RFT that don't
+        # apply to MTRL (e.g., min global_batch_size=16, required reward_lambda_arn).
+        _is_mtrl_serverless = (
+            method == TrainingMethod.RFT_MULTITURN_LORA and platform == Platform.SMTJServerless
+        )
+
         for key, override_metadata in overrides_template.items():
             # Skip HyperPod specific key since it's not actually present within recipes
             if key == "namespace":
+                continue
+            # Skip min/max/enum/type validation for MTRL serverless — validates these
+            if _is_mtrl_serverless and key not in ("output_s3_path", "data_s3_path", "model_type"):
                 continue
             # TODO: Need to figure out what this actually refers to within the recipe. Until then, we won't validate it.
             elif key == "max_context_length":

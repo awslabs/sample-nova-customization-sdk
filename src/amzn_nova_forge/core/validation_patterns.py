@@ -28,6 +28,10 @@ NAMESPACE_REGEX = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 # https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateCluster.html#API_CreateCluster_RequestParameters
 CLUSTER_NAME_REGEX = re.compile(r"^[0-9A-Za-z][A-Za-z0-9\-_]{1,100}$")
 
+MODEL_PACKAGE_ARN_REGEX = re.compile(
+    r"^arn:aws[\w-]*:sagemaker:[a-z0-9-]+:\d{12}:model-package/.+$"
+)
+
 
 def validate_job_name(job_name: str) -> None:
     if not JOB_NAME_REGEX.match(job_name):

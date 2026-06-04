@@ -42,6 +42,9 @@ from amzn_nova_forge.core.enums import (
 from amzn_nova_forge.core.runtime import RuntimeManager
 from amzn_nova_forge.core.training_overrides import NULLABLE_OVERRIDE_FIELDS
 from amzn_nova_forge.core.types import ConfigParameter, RecipeConfig, ValidationConfig
+from amzn_nova_forge.core.validation_patterns import (
+    MODEL_PACKAGE_ARN_REGEX,
+)
 from amzn_nova_forge.monitor import MLflowMonitor
 from amzn_nova_forge.rft_multiturn import RFTMultiturnInfrastructure
 from amzn_nova_forge.util.checkpoint_util import validate_checkpoint_uri
@@ -133,7 +136,10 @@ class RecipeBuilder:
             self.mlflow_tracking_uri = None
 
         # RFT
-        if method == TrainingMethod.RFT_LORA or method == TrainingMethod.RFT_FULL:
+        if method in (
+            TrainingMethod.RFT_LORA,
+            TrainingMethod.RFT_FULL,
+        ):
             self.rft_lambda_arn = rft_lambda_arn
         elif rft_lambda_arn is not None:
             logger.info("'rft_lambda_arn' is only required for RFT. Will ignore.")
@@ -149,10 +155,10 @@ class RecipeBuilder:
                     f"{method} method is only supported on Nova 2.0. "
                     f"You provided {model}. Please use Model.NOVA_LITE_2."
                 )
-            if not rft_multiturn_infra:
+            if not rft_multiturn_infra and platform != Platform.SMTJServerless:
                 raise ValueError("'rft_multiturn_infra' is required for RFT multiturn training")
         elif method == TrainingMethod.EVALUATION and eval_task == EvaluationTask.RFT_MULTITURN_EVAL:
-            if not rft_multiturn_infra:
+            if not rft_multiturn_infra and platform != Platform.SMTJServerless:
                 raise ValueError("'rft_multiturn_infra' is required for RFT multiturn evaluation")
 
         # Validation data handling
@@ -365,8 +371,11 @@ class RecipeBuilder:
                 overrides_template.setdefault("mlflow_experiment_name", {})["default"] = ""
                 overrides_template.setdefault("mlflow_run_name", {})["default"] = ""
 
-            # RFT
-            if self.method == TrainingMethod.RFT_LORA or self.method == TrainingMethod.RFT_FULL:
+            # RFT (single-turn only — MTRL uses agent_core_arn directly)
+            if self.method in (
+                TrainingMethod.RFT_LORA,
+                TrainingMethod.RFT_FULL,
+            ):
                 overrides_template.setdefault("reward_lambda_arn", {})["default"] = (
                     self.rft_lambda_arn
                 )
@@ -474,28 +483,28 @@ class RecipeBuilder:
                         return False
             if key == "model_name_or_path":
                 if key in overrides:
-                    if not str(overrides[key]).startswith("s3://"):
+                    if str(overrides[key]).startswith("s3://"):
+                        validate_checkpoint_uri(
+                            checkpoint_uri=str(overrides[key]), region=self.region
+                        )
+                    elif not MODEL_PACKAGE_ARN_REGEX.match(str(overrides[key])):
                         logger.warning(
                             f"Override for '{key}' will be ignored. If you wish to use a different model than {self.model.name}, please update your NovaModelCustomizer object."
                         )
                         return False
-                    else:
-                        validate_checkpoint_uri(
-                            checkpoint_uri=str(overrides[key]), region=self.region
-                        )
                 elif key in input_recipe_key_values:
-                    if not str(input_recipe_key_values[key]).startswith(
-                        "s3://"
+                    if str(input_recipe_key_values[key]).startswith("s3://"):
+                        validate_checkpoint_uri(
+                            checkpoint_uri=str(input_recipe_key_values[key]),
+                            region=self.region,
+                        )
+                    elif not MODEL_PACKAGE_ARN_REGEX.match(
+                        str(input_recipe_key_values[key])
                     ) and self.model.model_path != str(input_recipe_key_values[key]):
                         logger.warning(
                             f"{key} '{str(input_recipe_key_values[key])}' will be ignored from your input recipe. If you wish to use a different model than {self.model.name}, please update your NovaModelCustomizer object."
                         )
                         return False
-                    elif str(input_recipe_key_values[key]).startswith("s3://"):
-                        validate_checkpoint_uri(
-                            checkpoint_uri=str(input_recipe_key_values[key]),
-                            region=self.region,
-                        )
             # ignoring data_s3_path as we use it to determine modality of data for getting Datamixing recipes
             if key == "data_s3_path" and self.is_multimodal:
                 if key in overrides or key in input_recipe_key_values:
@@ -987,6 +996,15 @@ class RecipeBuilder:
         ):
             if "rl_env" in final_recipe_dict and "reward_lambda_arn" in final_recipe_dict["rl_env"]:
                 del final_recipe_dict["rl_env"]["reward_lambda_arn"]
+
+        if self.mlflow_tracking_uri:
+            final_recipe_dict.setdefault("run", {})["mlflow_tracking_uri"] = (
+                self.mlflow_tracking_uri
+            )
+            if self.mlflow_experiment_name:
+                final_recipe_dict["run"]["mlflow_experiment_name"] = self.mlflow_experiment_name
+            if self.mlflow_run_name:
+                final_recipe_dict["run"]["mlflow_run_name"] = self.mlflow_run_name
 
         if self.enable_batch_sample_tracing:
             final_recipe_dict.setdefault("training_config", {})["enable_batch_sample_tracing"] = (

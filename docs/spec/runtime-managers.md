@@ -426,7 +426,9 @@ def __init__(
     security_group_ids: Optional[list[str]] = None,
     max_job_runtime: Optional[int] = 86400,
     rft_lambda: Optional[str] = None,
+    agent_core_arn: Optional[str] = None,
     evaluator_name: Optional[str] = None,
+    intermediate_model_package_group_name: Optional[str] = None,
 )
 ```
 
@@ -438,15 +440,24 @@ def __init__(
 - `subnets` (Optional[list[str]]): Optional list of strings representing subnets. Default value is None.
 - `security_group_ids` (Optional[list[str]]): Optional list of strings representing security group IDs. Default value is None.
 - `max_job_runtime` (Optional[int]): Max Job Runtime in seconds (default: 1 day)
-- `rft_lambda` (Optional[str]): Lambda ARN, SageMaker hub-content ARN, or local `.py` file path for the RFT reward function.
+- `rft_lambda` (Optional[str]): Lambda ARN, SageMaker hub-content ARN, or local `.py` file path for the RFT reward function. Used for single-turn RFT or as an alternative agent environment for MTRL on serverless.
   - **Lambda ARN**: Automatically registered as a hub-content `JsonDoc` evaluator during `train()`. The hub-content ARN is passed as `EvaluatorArn` in `ServerlessJobConfig`.
   - **Hub-content ARN**: Passed directly as `EvaluatorArn` — no registration needed.
   - **Local `.py` file**: Call `deploy_lambda()` first to deploy and get a Lambda ARN.
+- `agent_core_arn` (Optional[str]): Bedrock AgentCore runtime ARN for MTRL training. If both `agent_core_arn` and `rft_lambda` are set, `agent_core_arn` takes priority as the agent environment.
 - `evaluator_name` (Optional[str]): Optional human-readable name for the hub-content evaluator entry when auto-registering a Lambda ARN. Defaults to the Lambda function name.
+- `intermediate_model_package_group_name` (Optional[str]): Model package group name for intermediate checkpoints during MTRL training. If not set, defaults to `{model_package_group_name}-checkpoints`.
 
 **Example:**
 ```python
 from amzn_nova_forge.manager import *
+
+# With Bedrock AgentCore (for MTRL training)
+infra = SMTJServerlessRuntimeManager(
+    model_package_group_name="nova-rft-serverless",
+    execution_role="arn:aws:iam::123456789012:role/my-role",
+    agent_core_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent",
+)
 
 # With a Lambda ARN (auto-registered as hub-content during train())
 infra = SMTJServerlessRuntimeManager(

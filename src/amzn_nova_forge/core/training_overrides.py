@@ -63,5 +63,18 @@ class TrainingOverrides(TypedDict, total=False):
 
     top_logprobs: int
 
+    # MTRL-specific overrides
+    advantage_method: str
+    lora_rank: int
+    loss_fn: str
+    max_tokens: int
+    group_size: int
+    rollout_max_concurrency: int
+    rollout_timeout: int
+    sampling_temperature: float
+    top_p: float
+    save_every: int
+    eval_every: int
+
 
 NULLABLE_OVERRIDE_FIELDS: frozenset[str] = frozenset({"reasoning_effort"})

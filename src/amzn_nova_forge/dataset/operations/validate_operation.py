@@ -51,7 +51,20 @@ class SchemaValidateOperation(NovaForgeValidateOperation):
                 "For RFT Multiturn evaluation, pass eval_task=EvaluationTask.RFT_MULTITURN_EVAL"
             )
 
-        validator = resolve_schema_validator(training_method, model, eval_task)
+        # For Serverless MTRL, use the serverless validator
+        is_mtrl = training_method in (
+            TrainingMethod.RFT_MULTITURN_LORA,
+            TrainingMethod.RFT_MULTITURN_FULL,
+        )
+        if is_mtrl and platform == Platform.SMTJServerless:
+            from amzn_nova_forge.dataset.dataset_validator.rft_multiturn_dataset_validator import (
+                RFTMultiturnServerlessValidator,
+            )
+
+            validator: Optional[Any] = RFTMultiturnServerlessValidator(model)
+        else:
+            validator = resolve_schema_validator(training_method, model, eval_task)
+
         if validator is None:
             logger.info(
                 "Validate: skipped — not available for model=%s / method=%s",

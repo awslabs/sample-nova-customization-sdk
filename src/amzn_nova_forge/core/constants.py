@@ -16,6 +16,7 @@ Shared constants for Nova Forge SDK.
 """
 
 import os
+import re
 from typing import Dict, List
 
 from amzn_nova_forge.core.enums import (
@@ -27,6 +28,15 @@ from amzn_nova_forge.core.enums import (
 )
 
 DEFAULT_REGION = "us-east-1"
+
+# MTRL CloudWatch log groups
+MTRL_TRAIN_LOG_GROUP = "/aws/sagemaker/Job/AgentRFT"
+MTRL_EVAL_LOG_GROUP = "/aws/sagemaker/Job/AgentRFTEvaluation"
+
+# MTRL pipeline execution ARN pattern
+MTRL_PIPELINE_EXECUTION_RE = re.compile(
+    r"^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:pipeline/.+/execution/.+"
+)
 DEFAULT_JOB_CACHE_DIR = "~/.nova-forge/cache"
 DEFAULT_BATCH_TRACE_CACHE_DIR = "~/.nova-forge/batch_trace_cache"
 BATCH_TRACE_LOG_SUBDIR = "batch_tracing"

@@ -917,6 +917,165 @@ class TestCreateBedrockBatchInferenceRole(unittest.TestCase):
         )
 
 
+class TestSagemakerModelPackagePolicy(unittest.TestCase):
+    """Tests that sagemaker_model_package_policy is created and attached by both role creators."""
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib import resources as importlib_resources
+
+        with (
+            importlib_resources.files("amzn_nova_forge.iam")
+            .joinpath("sagemaker_policies.json")
+            .open() as f
+        ):
+            sagemaker_policies = json.load(f)
+        with (
+            importlib_resources.files("amzn_nova_forge.iam")
+            .joinpath("bedrock_policies.json")
+            .open() as f
+        ):
+            bedrock_policies = json.load(f)
+
+        cls.sagemaker_model_package_policy = sagemaker_policies["sagemaker_model_package_policy"]
+        cls.bedrock_model_package_policy = bedrock_policies["sagemaker_model_package_policy"]
+
+    @patch("boto3.client")
+    def test_bedrock_role_creates_sagemaker_model_package_policy(self, mock_boto_client):
+        """create_bedrock_execution_role creates and attaches sagemaker_model_package_policy."""
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Account": "123456789012"}
+        mock_boto_client.return_value = mock_sts
+
+        role_name = "test-bedrock-role"
+        mock_iam = MagicMock()
+        mock_iam.exceptions.NoSuchEntityException = type("NoSuchEntityException", (Exception,), {})
+        mock_iam.exceptions.EntityAlreadyExistsException = type(
+            "EntityAlreadyExistsException", (Exception,), {}
+        )
+        mock_iam.get_role.side_effect = mock_iam.exceptions.NoSuchEntityException("not found")
+        mock_iam.create_policy.return_value = {
+            "Policy": {"Arn": "arn:aws:iam::123456789012:policy/foo"}
+        }
+
+        create_bedrock_execution_role(iam_client=mock_iam, role_name=role_name)
+
+        mock_iam.create_policy.assert_any_call(
+            PolicyName=f"{role_name}Sagemaker_Model_Package_Policy",
+            PolicyDocument=json.dumps(self.bedrock_model_package_policy),
+        )
+        mock_iam.attach_role_policy.assert_any_call(
+            RoleName=role_name,
+            PolicyArn="arn:aws:iam::123456789012:policy/foo",
+        )
+
+    @patch("boto3.client")
+    def test_sagemaker_role_creates_sagemaker_model_package_policy(self, mock_boto_client):
+        """create_sagemaker_execution_role creates and attaches sagemaker_model_package_policy."""
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Account": "123456789012"}
+        mock_boto_client.return_value = mock_sts
+
+        role_name = "test-sagemaker-role"
+        mock_iam = MagicMock()
+        mock_iam.exceptions.NoSuchEntityException = type("NoSuchEntityException", (Exception,), {})
+        mock_iam.exceptions.EntityAlreadyExistsException = type(
+            "EntityAlreadyExistsException", (Exception,), {}
+        )
+        mock_iam.get_role.side_effect = mock_iam.exceptions.NoSuchEntityException("not found")
+        mock_iam.create_policy.return_value = {
+            "Policy": {"Arn": "arn:aws:iam::123456789012:policy/foo"}
+        }
+
+        create_sagemaker_execution_role(iam_client=mock_iam, role_name=role_name)
+
+        mock_iam.create_policy.assert_any_call(
+            PolicyName=f"{role_name}Sagemaker_Model_Package_Policy",
+            PolicyDocument=json.dumps(self.sagemaker_model_package_policy),
+        )
+        mock_iam.attach_role_policy.assert_any_call(
+            RoleName=role_name,
+            PolicyArn="arn:aws:iam::123456789012:policy/foo",
+        )
+
+    @patch("boto3.client")
+    def test_bedrock_role_handles_existing_model_package_policy(self, mock_boto_client):
+        """create_bedrock_execution_role handles EntityAlreadyExistsException for sagemaker_model_package_policy."""
+        account_id = "123456789012"
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Account": account_id}
+        mock_boto_client.return_value = mock_sts
+
+        role_name = "test-bedrock-role"
+        mock_iam = MagicMock()
+        mock_iam.exceptions.NoSuchEntityException = type("NoSuchEntityException", (Exception,), {})
+        mock_iam.exceptions.EntityAlreadyExistsException = type(
+            "EntityAlreadyExistsException", (Exception,), {}
+        )
+        mock_iam.get_role.side_effect = mock_iam.exceptions.NoSuchEntityException("not found")
+
+        # First two policies succeed, sagemaker_model_package_policy already exists
+        existing_policy_arn = (
+            f"arn:aws:iam::{account_id}:policy/{role_name}Sagemaker_Model_Package_Policy"
+        )
+        mock_iam.create_policy.side_effect = [
+            {"Policy": {"Arn": f"arn:aws:iam::{account_id}:policy/{role_name}Bedrock_Policy"}},
+            {"Policy": {"Arn": f"arn:aws:iam::{account_id}:policy/{role_name}S3_Read_Policy"}},
+            mock_iam.exceptions.EntityAlreadyExistsException("already exists"),
+        ]
+        mock_iam.get_policy.return_value = {"Policy": {"Arn": existing_policy_arn}}
+
+        create_bedrock_execution_role(iam_client=mock_iam, role_name=role_name)
+
+        mock_iam.get_policy.assert_called_with(PolicyArn=existing_policy_arn)
+        mock_iam.attach_role_policy.assert_any_call(
+            RoleName=role_name,
+            PolicyArn=existing_policy_arn,
+        )
+
+    @patch("boto3.client")
+    def test_sagemaker_role_handles_existing_model_package_policy(self, mock_boto_client):
+        """create_sagemaker_execution_role handles EntityAlreadyExistsException for sagemaker_model_package_policy."""
+        account_id = "123456789012"
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Account": account_id}
+        mock_boto_client.return_value = mock_sts
+
+        role_name = "test-sagemaker-role"
+        mock_iam = MagicMock()
+        mock_iam.exceptions.NoSuchEntityException = type("NoSuchEntityException", (Exception,), {})
+        mock_iam.exceptions.EntityAlreadyExistsException = type(
+            "EntityAlreadyExistsException", (Exception,), {}
+        )
+        mock_iam.get_role.side_effect = mock_iam.exceptions.NoSuchEntityException("not found")
+
+        # First 8 policies succeed, sagemaker_model_package_policy (9th) already exists
+        existing_policy_arn = (
+            f"arn:aws:iam::{account_id}:policy/{role_name}Sagemaker_Model_Package_Policy"
+        )
+        successful_result = {"Policy": {"Arn": f"arn:aws:iam::{account_id}:policy/foo"}}
+        mock_iam.create_policy.side_effect = [
+            successful_result,  # cloudwatch_ec2_ec2_policy
+            successful_result,  # cloudwatch_metric_policy
+            successful_result,  # cloudwatch_logstream_policy
+            successful_result,  # cloudwatch_loggroup_policy
+            successful_result,  # ecr_read_policy
+            successful_result,  # s3_read_policy
+            successful_result,  # kms_policy
+            successful_result,  # ec2_policy
+            mock_iam.exceptions.EntityAlreadyExistsException("already exists"),
+        ]
+        mock_iam.get_policy.return_value = {"Policy": {"Arn": existing_policy_arn}}
+
+        create_sagemaker_execution_role(iam_client=mock_iam, role_name=role_name)
+
+        mock_iam.get_policy.assert_called_with(PolicyArn=existing_policy_arn)
+        mock_iam.attach_role_policy.assert_any_call(
+            RoleName=role_name,
+            PolicyArn=existing_policy_arn,
+        )
+
+
 class TestRegionPropagation(unittest.TestCase):
     """Tests that the region parameter is propagated to the STS client."""
 

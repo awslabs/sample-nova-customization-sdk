@@ -305,6 +305,87 @@ monitor.plot_metrics(
 
 ---
 
+### MTRLLogMonitor
+
+Log monitor for MTRL (Multi-Turn RL) training and evaluation jobs. Auto-detects whether a job is a training job or an evaluation job by checking CloudWatch log groups.
+
+#### Constructor
+
+**Signature:**
+```python
+def __init__(
+    self,
+    job_id: str,
+    region: Optional[str] = None,
+    job_category: Optional[str] = None,
+)
+```
+
+**Parameters:**
+- `job_id` (str): The MTRL job name (training or evaluation)
+- `region` (Optional[str]): AWS region
+- `job_category` (Optional[str]): Job category override (`"AgentRFT"` for training, `"AgentRFTEvaluation"` for eval). Auto-detected if not provided.
+
+#### Class Methods
+
+##### `from_job_id()`
+
+**Signature:**
+```python
+@classmethod
+def from_job_id(
+    cls,
+    job_id: str,
+    region: Optional[str] = None,
+    job_category: Optional[str] = None,
+) -> "MTRLLogMonitor"
+```
+
+**Example:**
+```python
+from amzn_nova_forge.monitor import MTRLLogMonitor
+
+# Auto-detects training vs eval
+monitor = MTRLLogMonitor.from_job_id(
+    job_id="my-mtrl-job",
+    region="us-east-1",
+)
+monitor.show_logs(limit=20)
+```
+
+#### Methods
+
+##### `show_logs()`
+
+Displays job logs. For training jobs, uses `AgentRFTJob.wait()` for live progress. For evaluation jobs, reads CloudWatch logs from `/aws/sagemaker/Job/AgentRFTEvaluation`.
+
+**Signature:**
+```python
+def show_logs(
+    self,
+    poll: int = 30,
+    timeout: int = 7200,
+    limit: Optional[int] = None,
+) -> None
+```
+
+**Parameters:**
+- `poll` (int): Polling interval in seconds (training jobs only)
+- `timeout` (int): Maximum wait time in seconds (training jobs only)
+- `limit` (Optional[int]): Maximum number of log events to display (eval jobs)
+
+**Example:**
+```python
+# Monitor an eval job
+monitor = MTRLLogMonitor.from_job_id(job_id="my-eval-job", region="us-east-1")
+monitor.show_logs(limit=50)
+
+# Also accessible via ForgeEvaluator.get_logs()
+evaluator.get_logs(job_result=eval_result, limit=20)
+```
+
+---
+
 ### MLflowMonitor
 
 MLflow monitoring configuration for Nova model training. This class provides experiment tracking capabilities through MLflow integration.

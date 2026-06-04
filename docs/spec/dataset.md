@@ -414,6 +414,7 @@ def transform(
   - `training_method` (TrainingMethod): Required. The training method (e.g., `TrainingMethod.SFT_LORA`).
   - `model` (Model): Required. The target model.
   - `eval_task` (EvaluationTask): Optional. Required when `training_method` is `EVALUATION`.
+  - `platform` (Platform): Required for RFT Multiturn methods (`RFT_MULTITURN_LORA`, `RFT_MULTITURN_FULL`). Determines the output format: `Platform.SMTJServerless` produces flat `{"prompt": "..."}` format, `Platform.SMHP` produces nested `{"id": "...", "metadata": {"prompt": "..."}}` format.
   - `column_mappings` (dict): Optional. Maps standard column names to your dataset's column names.
   - `multimodal_data_s3_path` (Optional[str]): S3 prefix where images will be uploaded during conversion (e.g., `s3://my-bucket/images/`). Required when the dataset contains `image_url` content blocks in OpenAI format. When saving the output to S3, the save path must use the same bucket.
   - `multimodal_data_bucket_owner` (Optional[str]): AWS account ID that owns the S3 bucket. If not provided, auto-resolved via STS.
@@ -460,7 +461,7 @@ def validate(
 - `method` (ValidateMethod): The validation method (default: `ValidateMethod.INVALID_RECORDS`). `ValidateMethod.SCHEMA` is deprecated but still supported for backward compatibility.
 - `model` (Model): The Nova model version (e.g., `Model.NOVA_LITE`)
 - `eval_task` (EvaluationTask): Optional. The evaluation task (e.g., `EvaluationTask.GEN_QA`)
-- `platform` (Platform): Optional. The target platform (`Platform.SMTJ`, `Platform.SMHP`, or `Platform.BEDROCK`). Accepted for forward-compatibility; row-count checks are currently enforced only during `train()`, not `validate()`.
+- `platform` (Platform): Optional. The target platform (`Platform.SMTJServerless`, `Platform.SMHP`, `Platform.SMTJ`, or `Platform.BEDROCK`). Required for RFT Multiturn methods — routes to `RFTMultiturnServerlessValidator` when `Platform.SMTJServerless`, validating the flat `{"prompt": "..."}` format.
 
 **Returns:**
 - None

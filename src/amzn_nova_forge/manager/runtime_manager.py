@@ -21,15 +21,16 @@ import subprocess
 import textwrap
 import time
 import zipfile
-from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import boto3
 import yaml
 from botocore.exceptions import ClientError, NoRegionError
 from sagemaker.core.helper.session_helper import Session, get_execution_role
 from sagemaker.core.shapes import (
+    ModelPackageConfig,
     OutputDataConfig,
     S3DataSource,
     TensorBoardOutputConfig,
@@ -50,6 +51,8 @@ from amzn_nova_forge.core.constants import (
 from amzn_nova_forge.core.enums import Model, Platform, TrainingMethod
 from amzn_nova_forge.core.runtime import RuntimeManager as RuntimeManagerBase
 from amzn_nova_forge.core.types import JobConfig
+from amzn_nova_forge.core.validation_patterns import MODEL_PACKAGE_ARN_REGEX
+from amzn_nova_forge.manager.mtrl_manager import MTRLOperations
 from amzn_nova_forge.telemetry import Feature, _telemetry_emitter
 from amzn_nova_forge.util.bedrock import (
     get_customization_type,
@@ -73,6 +76,7 @@ _METHOD_TO_SERVERLESS_CONFIG: Dict[TrainingMethod, tuple[str, Optional[str]]] = 
     TrainingMethod.DPO_LORA: ("DPO", "LORA"),
     TrainingMethod.DPO_FULL: ("DPO", None),
     TrainingMethod.RFT_LORA: ("RLVR", "LORA"),
+    TrainingMethod.RFT_MULTITURN_LORA: ("RLVR", "LORA"),
     # TrainingMethod.RFT_FULL: ("RLVR", None),  # TODO: Add RLVR full support
 }
 DEFAULT_SMTJ_JOB_MAX_RUNTIME = 86400  # 1 day
@@ -742,6 +746,45 @@ class SMTJRuntimeManager(RuntimeManager):
             if job_config.trainer_config_hyperparameters:
                 trainer_config["hyperparameters"] = job_config.trainer_config_hyperparameters
 
+            # If the model_name_or_path is a model package ARN,
+            # ModelTrainer.from_recipe() requires a ModelPackageConfig with model_package_group_arn.
+            model_package_config = None
+            if (
+                job_config.method == TrainingMethod.EVALUATION
+                and job_config.model_name_or_path
+                and MODEL_PACKAGE_ARN_REGEX.match(job_config.model_name_or_path)
+            ):
+                # Extract model package group name from the ARN
+                _parts = job_config.model_name_or_path.split("/")
+                if len(_parts) < 2:
+                    raise ValueError(
+                        f"Could not parse model package group name from ARN: '{job_config.model_name_or_path}'. "
+                        f"Expected format: arn:aws:sagemaker:region:account:model-package/group-name/version"
+                    )
+                _group_name = _parts[1]
+                # Look up the existing model package group ARN
+                try:
+                    _resp = self.sagemaker_client.describe_model_package_group(
+                        ModelPackageGroupName=_group_name
+                    )
+                    _group_arn = _resp["ModelPackageGroupArn"]
+                except ClientError as e:
+                    if e.response["Error"]["Code"] in (
+                        "ValidationException",
+                        "ResourceNotFoundException",
+                    ):
+                        raise ValueError(
+                            f"Model package group '{_group_name}' does not exist. "
+                            f"Ensure the model package ARN '{job_config.model_name_or_path}' refers to an existing group."
+                        ) from e
+                    raise  # Re-raise unexpected errors
+                model_package_config = ModelPackageConfig(
+                    model_package_group_arn=_group_arn,
+                )
+
+            if model_package_config:
+                trainer_config["model_package_config"] = model_package_config
+
             model_trainer = ModelTrainer.from_recipe(
                 **trainer_config
             ).with_tensorboard_output_config(tensorboard_output_config)
@@ -1398,6 +1441,8 @@ class SMTJDataPrepRuntimeManager(RuntimeManager):
         """Return True if the image is a standard private ECR image (account.dkr.ecr.region.amazonaws.com/...)."""
         parsed = urlparse(image_uri)
         host = parsed.hostname
+        # Handle schemeless image URIs such as:
+        # 123456789012.dkr.ecr.us-west-2.amazonaws.com/repo:tag
         if not host:
             host = parsed.path.split("/", 1)[0]
         if not host:
@@ -2120,7 +2165,7 @@ class BedrockRuntimeManager(RuntimeManager):
         return permissions
 
 
-class SMTJServerlessRuntimeManager(RuntimeManager):
+class SMTJServerlessRuntimeManager(MTRLOperations, RuntimeManager):
     def __init__(
         self,
         model_package_group_name: str,
@@ -2131,13 +2176,18 @@ class SMTJServerlessRuntimeManager(RuntimeManager):
         security_group_ids: Optional[list[str]] = None,
         max_job_runtime: Optional[int] = DEFAULT_SMTJ_JOB_MAX_RUNTIME,  # 1 day
         rft_lambda: Optional[str] = None,
+        agent_core_arn: Optional[str] = None,
         evaluator_name: Optional[str] = None,
+        hub_content_version: Optional[str] = None,
+        intermediate_model_package_group_name: Optional[str] = None,
     ):
         # NOTE: Not setting execution_role directly due to issues with mypy type inference
         self._execution_role = execution_role
         self.model_package_group_name = model_package_group_name
+        self.intermediate_model_package_group_name = intermediate_model_package_group_name
+        self.agent_core_arn = agent_core_arn
         self.evaluator_name = evaluator_name
-        self.hub_content_version: Optional[str] = None
+        self.hub_content_version: Optional[str] = hub_content_version
         self.subnets = subnets
         self.security_group_ids = security_group_ids
         self.encrypt_inter_container_traffic = encrypt_inter_container_traffic
@@ -2203,6 +2253,23 @@ class SMTJServerlessRuntimeManager(RuntimeManager):
                 ModelPackageGroupName=self.model_package_group_name
             )
             self.model_package_group_arn = resp["ModelPackageGroupArn"]
+
+    def _get_or_create_checkpoint_model_package_group_arn(self) -> str:
+        """Get or create a separate model package group for intermediate checkpoints."""
+        checkpoint_group_name = (
+            self.intermediate_model_package_group_name
+            or f"{self.model_package_group_name}-checkpoints"[:63]
+        )
+        try:
+            resp = self.sagemaker_client.describe_model_package_group(
+                ModelPackageGroupName=checkpoint_group_name
+            )
+            return resp["ModelPackageGroupArn"]
+        except self.sagemaker_client.exceptions.ClientError:
+            resp = self.sagemaker_client.create_model_package_group(
+                ModelPackageGroupName=checkpoint_group_name
+            )
+            return resp["ModelPackageGroupArn"]
 
     def _resolve_base_model_arn(self, model: Model) -> str:
         """Resolve the BaseModelArn from SageMaker Hub for the given model."""
@@ -2357,9 +2424,13 @@ class SMTJServerlessRuntimeManager(RuntimeManager):
             config["CustomizationTechnique"] = technique
             if peft:
                 config["Peft"] = peft
-            # EvaluatorArn: reward function hub-content ARN for RLVR training.
+            # EvaluatorArn: reward function hub-content ARN for RLVR training,
+            # or agent runtime ARN for multiturn RLVR.
             # Lambda ARNs are passed via HyperParameters (reward_lambda_arn) instead.
-            if _is_hub_content_arn(evaluator_arn):
+            if evaluator_arn and (
+                _is_hub_content_arn(evaluator_arn)
+                or method in (TrainingMethod.RFT_MULTITURN_LORA, TrainingMethod.RFT_MULTITURN_FULL)
+            ):
                 config["EvaluatorArn"] = evaluator_arn
 
         return config
@@ -2452,16 +2523,32 @@ class SMTJServerlessRuntimeManager(RuntimeManager):
                     eval_task=recipe.get("evaluation", {}).get("task"),
                     evaluator_arn=evaluator_arn,
                 ),
-                "ModelPackageConfig": {
+            }
+
+            # ModelPackageConfig:
+            # - Training jobs: always include ModelPackageGroupArn.
+            # - Eval jobs: only include ModelPackageConfig when model_name_or_path is a
+            #   SageMaker ARN (fine-tuned model eval). Base model evals omit it entirely.
+            model_name_or_path = recipe.get("run", {}).get("model_name_or_path", "")
+            if job_config.method == TrainingMethod.EVALUATION:
+                if is_sagemaker_arn(model_name_or_path):
+                    model_package_config = {
+                        "ModelPackageGroupArn": self.model_package_group_arn,
+                        "SourceModelPackageArn": model_name_or_path,
+                    }
+                else:
+                    model_package_config = {}
+            else:
+                model_package_config = {
                     "ModelPackageGroupArn": self.model_package_group_arn,
-                    # model_name_or_path is a model package ARN for iterative training
                     **(
-                        {"SourceModelPackageArn": recipe["run"]["model_name_or_path"]}
-                        if is_sagemaker_arn(recipe.get("run", {}).get("model_name_or_path", ""))
+                        {"SourceModelPackageArn": model_name_or_path}
+                        if is_sagemaker_arn(model_name_or_path)
                         else {}
                     ),
-                },
-            }
+                }
+            if model_package_config:
+                create_params["ModelPackageConfig"] = model_package_config
 
             if self.kms_key_id:
                 create_params["OutputDataConfig"]["KmsKeyId"] = self.kms_key_id
@@ -2531,10 +2618,13 @@ class SMTJServerlessRuntimeManager(RuntimeManager):
             logger.error(f"Failed to start training job: {str(e)}")
             raise
 
-    def cleanup(self, job_name: str) -> None:
+    def cleanup(self, job_name: str, is_mtrl: bool = False) -> None:
         try:
-            self.sagemaker_client.stop_training_job(TrainingJobName=job_name)
-            self.sagemaker_client.close()
+            if is_mtrl:
+                self._cleanup_mtrl(job_name)
+            else:
+                self.sagemaker_client.stop_training_job(TrainingJobName=job_name)
+                self.sagemaker_client.close()
         except Exception as e:
             logger.error(f"Failed to cleanup job {job_name}: {str(e)}")
             raise

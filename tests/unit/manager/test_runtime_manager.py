@@ -20,6 +20,7 @@ import unittest
 import zipfile
 from unittest.mock import MagicMock, patch
 
+from amzn_nova_forge.core.enums import TrainingMethod
 from amzn_nova_forge.manager.runtime_manager import (
     DataPrepJobConfig,
     JobConfig,
@@ -162,6 +163,112 @@ class TestSMTJRuntimeManager(unittest.TestCase):
         self.assertNotIn("input_data_config", call_kwargs)
         mock_model_trainer.train.assert_called_once_with(wait=False, logs=False)
         self.assertEqual(job_id, "test-job-suffix")
+
+    @patch("amzn_nova_forge.manager.runtime_manager.boto3.client")
+    @patch("amzn_nova_forge.manager.runtime_manager.ModelTrainer")
+    @patch.object(SMTJRuntimeManager, "setup", return_value=None)
+    def test_execute_eval_with_model_package_arn_passes_model_package_config(
+        self, mock_setup, mock_model_trainer_cls, mock_boto_client
+    ):
+        """Eval job with a model package ARN should pass ModelPackageConfig to from_recipe."""
+        manager = self._create_manager()
+
+        mock_model_trainer = MagicMock()
+        mock_model_trainer.with_tensorboard_output_config.return_value = mock_model_trainer
+        mock_model_trainer_cls.from_recipe.return_value = mock_model_trainer
+
+        manager.sagemaker_client.list_training_jobs.return_value = {
+            "TrainingJobSummaries": [{"TrainingJobName": "eval-job-suffix"}]
+        }
+        manager.sagemaker_client.describe_model_package_group.return_value = {
+            "ModelPackageGroupArn": "arn:aws:sagemaker:us-east-1:123456789012:model-package-group/my-group"
+        }
+
+        model_package_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/3"
+        job_config = JobConfig(
+            job_name="eval-job",
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/eval-image:latest",
+            recipe_path="/path/to/recipe",
+            output_s3_path="s3://output-bucket/eval-output",
+            method=TrainingMethod.EVALUATION,
+            model_name_or_path=model_package_arn,
+        )
+
+        job_id = manager.execute(job_config)
+
+        call_kwargs = mock_model_trainer_cls.from_recipe.call_args.kwargs
+        self.assertIn("model_package_config", call_kwargs)
+        manager.sagemaker_client.describe_model_package_group.assert_called_once_with(
+            ModelPackageGroupName="my-group"
+        )
+        self.assertEqual(job_id, "eval-job-suffix")
+
+    @patch("amzn_nova_forge.manager.runtime_manager.boto3.client")
+    @patch("amzn_nova_forge.manager.runtime_manager.ModelTrainer")
+    @patch.object(SMTJRuntimeManager, "setup", return_value=None)
+    def test_execute_eval_with_s3_path_omits_model_package_config(
+        self, mock_setup, mock_model_trainer_cls, mock_boto_client
+    ):
+        """Eval job with an S3 path should not pass ModelPackageConfig."""
+        manager = self._create_manager()
+
+        mock_model_trainer = MagicMock()
+        mock_model_trainer.with_tensorboard_output_config.return_value = mock_model_trainer
+        mock_model_trainer_cls.from_recipe.return_value = mock_model_trainer
+
+        manager.sagemaker_client.list_training_jobs.return_value = {
+            "TrainingJobSummaries": [{"TrainingJobName": "eval-job-suffix"}]
+        }
+
+        job_config = JobConfig(
+            job_name="eval-job",
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/eval-image:latest",
+            recipe_path="/path/to/recipe",
+            output_s3_path="s3://output-bucket/eval-output",
+            method=TrainingMethod.EVALUATION,
+            model_name_or_path="s3://my-bucket/checkpoint/step_10",
+        )
+
+        job_id = manager.execute(job_config)
+
+        call_kwargs = mock_model_trainer_cls.from_recipe.call_args.kwargs
+        self.assertNotIn("model_package_config", call_kwargs)
+        self.assertEqual(job_id, "eval-job-suffix")
+
+    @patch("amzn_nova_forge.manager.runtime_manager.boto3.client")
+    @patch("amzn_nova_forge.manager.runtime_manager.ModelTrainer")
+    @patch.object(SMTJRuntimeManager, "setup", return_value=None)
+    def test_execute_eval_with_nonexistent_model_package_group_raises(
+        self, mock_setup, mock_model_trainer_cls, mock_boto_client
+    ):
+        """Eval job with a model package ARN pointing to a nonexistent group should raise."""
+        from botocore.exceptions import ClientError
+
+        manager = self._create_manager()
+
+        mock_model_trainer = MagicMock()
+        mock_model_trainer.with_tensorboard_output_config.return_value = mock_model_trainer
+        mock_model_trainer_cls.from_recipe.return_value = mock_model_trainer
+
+        manager.sagemaker_client.describe_model_package_group.side_effect = ClientError(
+            {"Error": {"Code": "ValidationException", "Message": "not found"}},
+            "DescribeModelPackageGroup",
+        )
+
+        model_package_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/missing-group/1"
+        job_config = JobConfig(
+            job_name="eval-job",
+            image_uri="123456789012.dkr.ecr.us-east-1.amazonaws.com/eval-image:latest",
+            recipe_path="/path/to/recipe",
+            output_s3_path="s3://output-bucket/eval-output",
+            method=TrainingMethod.EVALUATION,
+            model_name_or_path=model_package_arn,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            manager.execute(job_config)
+
+        self.assertIn("does not exist", str(ctx.exception))
 
     @patch.object(SMTJRuntimeManager, "setup", return_value=None)
     def test_cleanup_success(self, mock_setup):

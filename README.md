@@ -493,6 +493,7 @@ result.enable_job_notifications(
 
 Diagnose gradient spikes by identifying which training data lines were used in a specific training step. Enable with `enable_batch_sample_tracing=True` on `ForgeTrainer`, then call `trainer.trace_batch(result, step=N)` after the job completes. See [`docs/spec/service-classes.md`](docs/spec/service-classes.md) for full API details.
 
+
 ---
 ## Telemetry
 

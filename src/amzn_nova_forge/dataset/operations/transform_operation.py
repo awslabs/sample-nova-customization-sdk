@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 import boto3
 import jsonschema
 
-from ...core.enums import EvaluationTask, Model, TrainingMethod
+from ...core.enums import EvaluationTask, Model, Platform, TrainingMethod
 from ...util.iterator_utils import peek
 from ...util.logging import logger
 from ..data_state import DataLocation, DataState
@@ -41,6 +41,7 @@ class SchemaTransformOperation(NovaForgeTransformOperation):
         "convert_to_evaluation": DatasetTransformer.convert_to_evaluation,
         "convert_to_cpt": DatasetTransformer.convert_to_cpt,
         "convert_to_rft_multiturn": DatasetTransformer.convert_to_rft_multiturn,
+        "convert_to_rft_multiturn_serverless": DatasetTransformer.convert_to_rft_multiturn_serverless,
     }
 
     def execute(self, loader: Any, **kwargs) -> OperationResult:
@@ -52,6 +53,7 @@ class SchemaTransformOperation(NovaForgeTransformOperation):
         model: Optional[Model] = kwargs.get("model")
         eval_task: Optional[EvaluationTask] = kwargs.get("eval_task")
         region: Optional[str] = kwargs.get("region")
+        platform = kwargs.get("platform")
 
         if training_method is None or model is None:
             raise ValueError("training_method and model are required for schema transforms.")
@@ -66,8 +68,34 @@ class SchemaTransformOperation(NovaForgeTransformOperation):
         multimodal_data_s3_path = kwargs.get("multimodal_data_s3_path")
         multimodal_data_bucket_owner = kwargs.get("multimodal_data_bucket_owner")
 
+        # RFT Multiturn requires platform to determine output format
+        is_mtrl = training_method in (
+            TrainingMethod.RFT_MULTITURN_LORA,
+            TrainingMethod.RFT_MULTITURN_FULL,
+        )
+        if is_mtrl and platform is None:
+            raise ValueError(
+                "platform is required for RFT Multiturn transforms. "
+                "Pass platform=Platform.SMTJServerless or platform=Platform.SMHP. "
+                "Example: loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, "
+                "model=Model.NOVA_LITE_2, platform=Platform.SMTJServerless)"
+            )
+
+        if is_mtrl and platform == Platform.SMTJServerless:
+            transform_config = dict(transform_config)
+            transform_config["schema"] = None
+            transform_config["transformers"] = [
+                {
+                    "source_schema": None,
+                    "method": "convert_to_rft_multiturn_serverless",
+                    "msg": "Transforming to flat RFT Multiturn format for Serverless.",
+                },
+            ]
+
         # Already in target format — nothing to do
-        if self._validate_against_schema(loader.dataset, transform_config["schema"]):
+        if transform_config["schema"] is not None and self._validate_against_schema(
+            loader.dataset, transform_config["schema"]
+        ):
             logger.info("Transform: %s", transform_config["success_msg"])
             return OperationResult(status="SUCCEEDED", output_state=state)
 

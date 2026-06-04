@@ -19,6 +19,11 @@ import boto3
 import pandas
 from matplotlib import pyplot
 
+from amzn_nova_forge.core.constants import (
+    MTRL_EVAL_LOG_GROUP,
+    MTRL_PIPELINE_EXECUTION_RE,
+    MTRL_TRAIN_LOG_GROUP,
+)
 from amzn_nova_forge.core.enums import Platform, TrainingMethod
 from amzn_nova_forge.core.result.job_result import (
     BaseJobResult,
@@ -545,3 +550,164 @@ class CloudWatchLogMonitor:
         pyplot.grid(True)
         pyplot.style.use("seaborn-v0_8-white")
         pyplot.show()
+
+
+class MTRLLogMonitor:
+    """Log monitor for MTRL jobs.
+
+    Provides the same ``from_job_id`` / ``show_logs`` interface as
+    ``CloudWatchLogMonitor`` so the user experience is consistent.
+    Internally delegates to the ``AgentRFTJob.wait()`` for live
+    progress and ``get_training_metrics()`` for completed jobs.
+    Auto-detects whether the job is a training or evaluation job.
+    """
+
+    def __init__(
+        self, job_id: str, region: Optional[str] = None, job_category: Optional[str] = None
+    ):
+        self.job_id = job_id
+        self._region = region
+        self._job_category = job_category
+        self._rft_job = None
+
+    @classmethod
+    @_telemetry_emitter(Feature.MONITOR, "mtrl_from_job_id")
+    def from_job_id(
+        cls, job_id: str, region: Optional[str] = None, job_category: Optional[str] = None, **kwargs
+    ) -> "MTRLLogMonitor":
+        return cls(job_id=job_id, region=region, job_category=job_category)
+
+    def _detect_job_category(self) -> str:
+        """Auto-detect whether this is a training or evaluation job."""
+        if self._job_category:
+            return self._job_category
+
+        # Pipeline execution ARNs are always evaluation jobs
+        if MTRL_PIPELINE_EXECUTION_RE.match(self.job_id):
+            self._job_category = "AgentRFTEvaluation"
+            return self._job_category
+
+        try:
+            logs_client = boto3.client("logs", region_name=self._region)
+
+            for category, log_group in [
+                ("AgentRFT", MTRL_TRAIN_LOG_GROUP),
+                ("AgentRFTEvaluation", MTRL_EVAL_LOG_GROUP),
+            ]:
+                try:
+                    resp = logs_client.describe_log_streams(
+                        logGroupName=log_group,
+                        logStreamNamePrefix=self.job_id,
+                        limit=1,
+                    )
+                    if resp.get("logStreams"):
+                        self._job_category = category
+                        return category
+                except logs_client.exceptions.ResourceNotFoundException:
+                    continue
+        except Exception:
+            pass
+
+        self._job_category = "AgentRFT"
+        return self._job_category
+
+    def _get_rft_job(self):
+        if self._rft_job is None:
+            from sagemaker.train.agent_rft_job import AgentRFTJob
+
+            session = boto3.Session(region_name=self._region) if self._region else None
+            self._rft_job = AgentRFTJob.get(self.job_id, session=session)
+        return self._rft_job
+
+    @_telemetry_emitter(Feature.MONITOR, "mtrl_show_logs")
+    def show_logs(
+        self, poll: int = 30, timeout: int = 7200, limit: Optional[int] = None, **kwargs
+    ) -> None:
+        """Show MTRL job progress.
+
+        If the job is still running, blocks and displays a live progress panel.
+        If the job is completed, prints training metrics.
+        For eval jobs, reads CloudWatch logs directly.
+        """
+        category = self._detect_job_category()
+
+        if category == "AgentRFTEvaluation":
+            self._show_eval_logs(limit=limit)
+            return
+
+        rft_job = self._get_rft_job()
+        rft_job.refresh()
+        if rft_job.job_status in ("Completed", "Failed", "Stopped"):
+            print(f"Job '{self.job_id}' status: {rft_job.job_status}")
+            if rft_job.job_status == "Completed":
+                rft_job.get_training_metrics()
+        else:
+            rft_job.wait(poll=poll, timeout=timeout)
+
+    def _resolve_eval_job_names(self) -> List[tuple]:
+        """Resolve the underlying eval job name(s) from a pipeline execution ARN.
+
+        Returns list of (step_name, job_name) tuples.
+        """
+        if not MTRL_PIPELINE_EXECUTION_RE.match(self.job_id):
+            return [("", self.job_id)]
+
+        region = self.job_id.split(":")[3]
+        sm_client = boto3.client("sagemaker", region_name=region)
+        steps = sm_client.list_pipeline_execution_steps(PipelineExecutionArn=self.job_id)
+        jobs = []
+        for step in steps.get("PipelineExecutionSteps", []):
+            job_meta = step.get("Metadata", {}).get("Job", {})
+            if job_meta:
+                job_name = job_meta["Arn"].rsplit("/", 1)[-1]
+                step_name = step.get("StepName", "")
+                jobs.append((step_name, job_name))
+        return jobs or [("", self.job_id)]
+
+    def _show_eval_logs(self, limit: Optional[int] = None) -> None:
+        """Read and display CloudWatch logs for an MTRL evaluation job."""
+        jobs = self._resolve_eval_job_names()
+        region = (
+            self.job_id.split(":")[3]
+            if MTRL_PIPELINE_EXECUTION_RE.match(self.job_id)
+            else self._region
+        )
+        logs_client = boto3.client("logs", region_name=region)
+
+        for step_name, job_name in jobs:
+            if step_name:
+                print(f"\n--- {step_name} ---")
+
+            try:
+                resp = logs_client.describe_log_streams(
+                    logGroupName=MTRL_EVAL_LOG_GROUP,
+                    logStreamNamePrefix=job_name,
+                    limit=5,
+                )
+            except logs_client.exceptions.ResourceNotFoundException:
+                print(f"No log group found: {MTRL_EVAL_LOG_GROUP}")
+                return
+
+            streams = resp.get("logStreams", [])
+            if not streams:
+                print(f"No log stream found for job '{job_name}'")
+                continue
+
+            stream_name = streams[0]["logStreamName"]
+            params: Dict[str, Any] = {
+                "logGroupName": MTRL_EVAL_LOG_GROUP,
+                "logStreamName": stream_name,
+                "startFromHead": False,
+            }
+            if limit:
+                params["limit"] = limit
+
+            events_resp = logs_client.get_log_events(**params)
+            events = events_resp.get("events", [])
+
+            if not events:
+                print(f"No logs available yet for job '{job_name}'")
+                continue
+
+            for event in events:
+                print(event["message"].strip())

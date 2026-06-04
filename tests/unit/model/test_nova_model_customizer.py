@@ -215,7 +215,7 @@ class TestNovaModelCustomizer(unittest.TestCase):
                 model=Model.NOVA_MICRO,
                 method=TrainingMethod.SFT_LORA,
                 infra=runtime,
-                model_path="arn:aws:sagemaker:us-east-1:123:model-package/group/1",
+                model_path="arn:aws:sagemaker:us-east-1:123456789012:model-package/group/1",
             )
 
             # None should not raise (no iterative training)
@@ -1816,7 +1816,7 @@ class TestDeploy(TestNovaModelCustomizer):
         mock_boto_client,
     ):
         mock_sagemaker_role_creation.return_value = {"Role": {"Arn": "sagemaker:role:arn"}}
-        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123:model/test-model"
+        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123456789012:model/test-model"
         mock_create_endpoint.return_value = "sagemaker:endpoint:arn"
 
         result = self.customizer.deploy(
@@ -1833,7 +1833,7 @@ class TestDeploy(TestNovaModelCustomizer):
         self.assertIsNotNone(result.model_publish)
         self.assertEqual(
             result.model_publish.model_arn,
-            "arn:aws:sagemaker:us-east-1:123:model/test-model",
+            "arn:aws:sagemaker:us-east-1:123456789012:model/test-model",
         )
 
     @patch("boto3.client")
@@ -1889,6 +1889,7 @@ class TestDeploy(TestNovaModelCustomizer):
                     "Value": "s3://xn---checkpointbucket/ckpt/",
                 }
             ],
+            model_package_name=None,
         )
         mock_create_endpoint.assert_called_once_with(
             model_name="nova-micro-sft-lora-sagemaker-model",
@@ -1947,7 +1948,7 @@ class TestDeploy(TestNovaModelCustomizer):
         mock_boto_client,
     ):
         mock_sagemaker_role_creation.return_value = {"Role": {"Arn": "sagemaker:role:arn"}}
-        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123:model/test-model"
+        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123456789012:model/test-model"
         mock_create_endpoint.side_effect = Exception("Failed to create deployment")
 
         with self.assertRaises(Exception) as context:
@@ -1972,7 +1973,7 @@ class TestDeploy(TestNovaModelCustomizer):
     ):
         """deploy_to_sagemaker with model_deploy_result skips model creation."""
         mock_sagemaker_role_creation.return_value = {"Role": {"Arn": "sagemaker:role:arn"}}
-        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123:model/test-model"
+        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123456789012:model/test-model"
         mock_create_endpoint.return_value = "sagemaker:endpoint:arn"
         mock_boto_client.side_effect = self._make_boto_client_dispatcher()
 
@@ -2007,7 +2008,7 @@ class TestDeploy(TestNovaModelCustomizer):
     ):
         """Endpoint failure error message includes model ARN and retry hint."""
         mock_sagemaker_role_creation.return_value = {"Role": {"Arn": "sagemaker:role:arn"}}
-        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123:model/test-model"
+        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123456789012:model/test-model"
         mock_create_endpoint.side_effect = Exception("Endpoint creation failed")
         mock_boto_client.side_effect = self._make_boto_client_dispatcher()
 
@@ -2070,7 +2071,7 @@ class TestDeploy(TestNovaModelCustomizer):
     ):
         """deploy_to_sagemaker with skip_model_reuse=True skips tag-based model discovery."""
         mock_sagemaker_role_creation.return_value = {"Role": {"Arn": "sagemaker:role:arn"}}
-        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123:model/test-model"
+        mock_create_model.return_value = "arn:aws:sagemaker:us-east-1:123456789012:model/test-model"
         mock_create_endpoint.return_value = "sagemaker:endpoint:arn"
         mock_boto_client.side_effect = self._make_boto_client_dispatcher()
 
@@ -2898,7 +2899,7 @@ class TestPlatformValidation(TestNovaModelCustomizer):
         # Assert
         mock_boto3_client.assert_called_once_with("sagemaker-runtime", region_name="us-east-1")
         mock_invoke_sagemaker.assert_called_once_with(
-            request_body, "test-endpoint", mock_runtime_client
+            request_body, "test-endpoint", mock_runtime_client, inference_component_name=None
         )
         assert result == "Inference Result"
 
@@ -4845,6 +4846,47 @@ class TestNovaModelCustomizerGetConfig(unittest.TestCase):
             customizer.get_config(overrides=overrides)
 
         mock_get_config.assert_called_once_with(overrides=overrides)
+
+
+class TestCreateCustomModelDataSource(TestNovaModelCustomizer):
+    """Tests for facade-level create_custom_model() with custom_model_data_source."""
+
+    def test_raises_when_no_source_provided(self):
+        """Validation at facade level requires at least one source."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with self.assertRaises(ValueError) as ctx:
+                self.customizer.create_custom_model()
+
+        self.assertIn("custom_model_data_source", str(ctx.exception))
+
+    def test_delegates_custom_model_data_source_to_deployer(self):
+        """custom_model_data_source is passed through to ForgeDeployer."""
+        import warnings
+
+        data_source = {"modelPackageArnDataSource": {"modelPackageArn": "arn:pkg"}}
+
+        with patch.object(self.customizer, "_build_deployer") as mock_build:
+            mock_deployer = MagicMock()
+            mock_deployer.create_custom_model.return_value = MagicMock(
+                model_arn="arn:test", model_name="test"
+            )
+            mock_build.return_value = mock_deployer
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self.customizer.create_custom_model(custom_model_data_source=data_source)
+
+            mock_deployer.create_custom_model.assert_called_once_with(
+                model_artifact_path=None,
+                endpoint_name=None,
+                execution_role_name=None,
+                tags=None,
+                skip_model_reuse=False,
+                custom_model_data_source=data_source,
+            )
 
 
 if __name__ == "__main__":

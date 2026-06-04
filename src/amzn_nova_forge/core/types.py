@@ -72,8 +72,8 @@ class ModelConfigDict(TypedDict):
 
 @dataclass
 class ModelArtifacts:
-    checkpoint_s3_path: Optional[str]
-    output_s3_path: str
+    checkpoint_s3_path: Optional[str] = None
+    output_s3_path: Optional[str] = None
     output_model_arn: Optional[str] = None  # Model package ARN for SMTJServerless jobs
 
 
@@ -98,6 +98,7 @@ class DeploymentResult:
         return self.model_publish.escrow_uri if self.model_publish else None
 
     _status_checker: ClassVar[Optional[Callable]] = None
+    _sagemaker_status_checker: ClassVar[Optional[Callable]] = None
 
     @classmethod
     def _register_status_checker(cls, checker: Callable) -> None:
@@ -108,8 +109,32 @@ class DeploymentResult:
         """
         cls._status_checker = checker
 
+    @classmethod
+    def _register_sagemaker_status_checker(cls, checker: Callable) -> None:
+        """Register the function used to check SageMaker deployment status.
+
+        Called by util/sagemaker.py at import time to wire up the status
+        property without core/ needing to import util/.
+        """
+        cls._sagemaker_status_checker = checker
+
     @property
     def status(self):
+        if self.endpoint.platform == DeployPlatform.SAGEMAKER:
+            if DeploymentResult._sagemaker_status_checker is None:
+                try:
+                    import amzn_nova_forge.util.sagemaker  # noqa: F401
+                except ImportError:
+                    pass
+            if DeploymentResult._sagemaker_status_checker is None:
+                raise RuntimeError(
+                    "SageMaker status checker not available. "
+                    "Ensure amzn_nova_forge.util.sagemaker is imported."
+                )
+            return DeploymentResult._sagemaker_status_checker(
+                self.endpoint.uri, region=self.endpoint.region
+            )
+
         if DeploymentResult._status_checker is None:
             # Runtime fallback only — core/types.py does NOT import util.bedrock
             # at module load time.  This triggers registration if the caller
@@ -137,6 +162,76 @@ def validate_region(region: str) -> None:
 
 
 @dataclass
+class InferenceComponentConfig:
+    """Configuration for creating an inference component on a SageMaker endpoint.
+
+    When passed to create_sagemaker_endpoint, the endpoint is created without a
+    ModelName in ProductionVariants (IC-compatible mode) and an inference component
+    is created after the endpoint reaches InService. The IC references the SageMaker
+    model (created during deploy) via ModelName.
+
+    Args:
+        inference_component_name: Unique name for the inference component.
+        num_cpus: Number of vCPUs to allocate.
+        num_accelerators: Number of accelerators (GPUs) to allocate.
+        min_memory_in_mb: Minimum memory in MB to allocate.
+        copy_count: Number of model copies to deploy. Default: 1.
+        variant_name: Production variant name. Default: "primary".
+    """
+
+    inference_component_name: str
+    num_cpus: int
+    num_accelerators: int
+    min_memory_in_mb: int
+    copy_count: int = 1
+    variant_name: str = "primary"
+
+
+# Minimum compute resource requirements for inference components per model.
+# Format: {Model: (min_cpus, min_memory_mb, min_gpus)}
+_IC_MIN_COMPUTE_REQUIREMENTS: Dict[Model, tuple] = {
+    Model.NOVA_MICRO: (15, 25000, 4),
+    Model.NOVA_LITE: (20, 35000, 4),
+    Model.NOVA_LITE_2: (20, 100000, 4),
+}
+
+
+def validate_inference_component_resources(config: InferenceComponentConfig, model: Model) -> None:
+    """Validate that inference component compute resources meet minimum requirements.
+
+    Args:
+        config: The inference component configuration to validate.
+        model: The Nova model being deployed.
+
+    Raises:
+        ValueError: If any resource is below the minimum for the given model.
+    """
+    requirements = _IC_MIN_COMPUTE_REQUIREMENTS.get(model)
+    if requirements is None:
+        return  # No known requirements for this model, skip validation
+
+    min_cpus, min_memory_mb, min_gpus = requirements
+    errors = []
+
+    if config.num_cpus < min_cpus:
+        errors.append(f"num_cpus={config.num_cpus} is below minimum {min_cpus} for {model.value}")
+    if config.min_memory_in_mb < min_memory_mb:
+        errors.append(
+            f"min_memory_in_mb={config.min_memory_in_mb} is below minimum {min_memory_mb} for {model.value}"
+        )
+    if config.num_accelerators < min_gpus:
+        errors.append(
+            f"num_accelerators={config.num_accelerators} is below minimum {min_gpus} for {model.value}"
+        )
+
+    if errors:
+        raise ValueError(
+            f"Inference component resources do not meet minimum requirements for {model.value}: "
+            + "; ".join(errors)
+        )
+
+
+@dataclass
 class JobConfig:
     job_name: str
     image_uri: str
@@ -157,6 +252,7 @@ class JobConfig:
     method: Optional[TrainingMethod] = None  # Training method (required for Bedrock)
     data_mixing_config: Optional[Dict[str, Any]] = None  # Datamix percent fields (SMTJServerless)
     environment: Optional[Dict[str, str]] = None  # Environment variables for the training container
+    model_name_or_path: Optional[str] = None  # Model path or model package ARN
     # TODO: The mlflow config is populated in recipe for both SMTJ and SMHP but will only work for SMHP as SMTJ support for mlflow is only through boto3, fix this with sagemaker 3 update
 
 

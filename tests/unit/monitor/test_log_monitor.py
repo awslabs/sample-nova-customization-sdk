@@ -1036,6 +1036,137 @@ class TestCloudWatchLogMonitor(unittest.TestCase):
             monitor.plot_metrics(TrainingMethod.SFT_FULL)
 
 
+class TestMTRLLogMonitor(unittest.TestCase):
+    def test_from_job_id_no_category(self):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        monitor = MTRLLogMonitor.from_job_id(job_id="test-job", region="us-east-1")
+        self.assertEqual(monitor.job_id, "test-job")
+        self.assertIsNone(monitor._job_category)
+
+    def test_from_job_id_with_category(self):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        monitor = MTRLLogMonitor.from_job_id(
+            job_id="test-job", region="us-east-1", job_category="AgentRFTEvaluation"
+        )
+        self.assertEqual(monitor._job_category, "AgentRFTEvaluation")
+
+    @patch("boto3.client")
+    def test_detect_job_category_finds_eval(self, mock_boto3):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        mock_logs_client = Mock()
+        mock_logs_client.describe_log_streams.side_effect = [
+            {"logStreams": []},
+            {"logStreams": [{"logStreamName": "test-eval-job/"}]},
+        ]
+        mock_boto3.return_value = mock_logs_client
+
+        monitor = MTRLLogMonitor(job_id="test-eval-job", region="us-east-1")
+        category = monitor._detect_job_category()
+
+        self.assertEqual(category, "AgentRFTEvaluation")
+
+    @patch("boto3.client")
+    def test_detect_job_category_finds_training(self, mock_boto3):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        mock_logs_client = Mock()
+        mock_logs_client.describe_log_streams.side_effect = [
+            {"logStreams": [{"logStreamName": "test-train-job/"}]},
+        ]
+        mock_boto3.return_value = mock_logs_client
+
+        monitor = MTRLLogMonitor(job_id="test-train-job", region="us-east-1")
+        category = monitor._detect_job_category()
+
+        self.assertEqual(category, "AgentRFT")
+
+    @patch("boto3.client")
+    def test_detect_job_category_skips_if_already_set(self, mock_boto3):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        monitor = MTRLLogMonitor(
+            job_id="test-job", region="us-east-1", job_category="AgentRFTEvaluation"
+        )
+        category = monitor._detect_job_category()
+
+        self.assertEqual(category, "AgentRFTEvaluation")
+        mock_boto3.assert_not_called()
+
+    @patch("builtins.print")
+    @patch("boto3.client")
+    def test_show_eval_logs(self, mock_boto3, mock_print):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        mock_logs_client = Mock()
+        mock_logs_client.describe_log_streams.return_value = {
+            "logStreams": [{"logStreamName": "eval-job-123/"}]
+        }
+        mock_logs_client.get_log_events.return_value = {
+            "events": [
+                {"message": "Progress: 5/50\n"},
+                {"message": "Progress: 10/50\n"},
+            ]
+        }
+        mock_boto3.return_value = mock_logs_client
+
+        monitor = MTRLLogMonitor(
+            job_id="eval-job-123", region="us-east-1", job_category="AgentRFTEvaluation"
+        )
+        monitor.show_logs(limit=5)
+
+        mock_print.assert_any_call("Progress: 5/50")
+        mock_print.assert_any_call("Progress: 10/50")
+
+    @patch("builtins.print")
+    @patch("boto3.client")
+    def test_show_eval_logs_no_streams(self, mock_boto3, mock_print):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        mock_logs_client = Mock()
+        mock_logs_client.describe_log_streams.return_value = {"logStreams": []}
+        mock_boto3.return_value = mock_logs_client
+
+        monitor = MTRLLogMonitor(
+            job_id="no-such-job", region="us-east-1", job_category="AgentRFTEvaluation"
+        )
+        monitor.show_logs()
+
+        mock_print.assert_called_once_with("No log stream found for job 'no-such-job'")
+
+    @patch("amzn_nova_forge.monitor.log_monitor.MTRLLogMonitor.from_job_id")
+    def test_forge_evaluator_get_logs_routes_to_mtrl_monitor(self, mock_from_job_id):
+        """ForgeEvaluator.get_logs() routes MTRL eval results to MTRLLogMonitor."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch as mock_patch
+
+        from amzn_nova_forge.core.enums import EvaluationTask
+
+        mock_monitor = Mock()
+        mock_from_job_id.return_value = mock_monitor
+
+        mock_result = Mock()
+        mock_result.job_id = "arn:aws:sagemaker:us-east-1:123456789012:pipeline/Eval/execution/abc"
+        mock_result.eval_task = EvaluationTask.RFT_MULTITURN_EVAL
+        mock_result.started_time = datetime(2026, 6, 3, tzinfo=timezone.utc)
+
+        from amzn_nova_forge.evaluator.forge_evaluator import ForgeEvaluator
+
+        with mock_patch.object(ForgeEvaluator, "__init__", return_value=None):
+            evaluator = ForgeEvaluator.__new__(ForgeEvaluator)
+            evaluator.region = "us-east-1"
+            evaluator.get_logs(job_result=mock_result, limit=10)
+
+        mock_from_job_id.assert_called_once_with(
+            job_id=mock_result.job_id,
+            region="us-east-1",
+            job_category="AgentRFTEvaluation",
+        )
+        mock_monitor.show_logs.assert_called_once_with(limit=10)
+
+
 class TestRegionPropagation(unittest.TestCase):
     @patch("boto3.client")
     def test_cloudwatch_log_monitor_passes_region_to_logs_client(self, mock_boto_client):

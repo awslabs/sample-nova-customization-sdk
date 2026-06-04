@@ -438,5 +438,241 @@ class TestRegionPropagation(unittest.TestCase):
             mock_boto3.assert_called_once_with("bedrock", region_name="eu-west-1")
 
 
+class TestSMTJTrainingResultMTRL(unittest.TestCase):
+    """Tests for MTRL-specific methods on SMTJTrainingResult."""
+
+    def setUp(self):
+        self.model_artifacts = ModelArtifacts(
+            output_s3_path="s3://bucket/output/",
+            output_model_arn="arn:aws:sagemaker:us-east-1:123456789012:model-package/grp/1",
+        )
+
+    @patch("amzn_nova_forge.core.result.training_result.boto3.client")
+    def test_wait_raises_for_non_mtrl(self, _mock_client):
+        result = SMTJTrainingResult(
+            job_id="sft-job",
+            started_time=datetime(2026, 1, 1),
+            method=TrainingMethod.SFT_LORA,
+            model_artifacts=self.model_artifacts,
+            model_type=Model.NOVA_LITE_2,
+        )
+        with self.assertRaises(NotImplementedError):
+            result.wait()
+
+    @patch("amzn_nova_forge.core.result.training_result.boto3.client")
+    def test_get_training_metrics_raises_for_non_mtrl(self, _mock_client):
+        result = SMTJTrainingResult(
+            job_id="sft-job",
+            started_time=datetime(2026, 1, 1),
+            method=TrainingMethod.SFT_LORA,
+            model_artifacts=self.model_artifacts,
+            model_type=Model.NOVA_LITE_2,
+        )
+        with self.assertRaises(NotImplementedError):
+            result.get_training_metrics()
+
+    @patch("amzn_nova_forge.core.result.training_result.boto3.client")
+    def test_wait_delegates_to_rft_job(self, _mock_client):
+        import sys
+        import types
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.output_model_package_arn = (
+            "arn:aws:sagemaker:us-east-1:123456789012:model-package/grp/2"
+        )
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        result = SMTJTrainingResult(
+            job_id="mtrl-job",
+            started_time=datetime(2026, 1, 1),
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            model_artifacts=ModelArtifacts(output_s3_path="s3://bucket/output/"),
+            model_type=Model.NOVA_LITE_2,
+            region="us-east-1",
+        )
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            result.wait(poll=5, timeout=60)
+
+        mock_rft_job.wait.assert_called_once_with(poll=5, timeout=60)
+        mock_rft_job.refresh.assert_called_once()
+        self.assertEqual(
+            result.model_artifacts.output_model_arn,
+            "arn:aws:sagemaker:us-east-1:123456789012:model-package/grp/2",
+        )
+
+    @patch("amzn_nova_forge.core.result.training_result.boto3.client")
+    def test_get_training_metrics_delegates_to_rft_job(self, _mock_client):
+        import sys
+        import types
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.output_model_package_arn = None
+        mock_rft_job.get_training_metrics.return_value = [{"step": 1, "reward": 0.5}]
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        result = SMTJTrainingResult(
+            job_id="mtrl-job",
+            started_time=datetime(2026, 1, 1),
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            model_artifacts=ModelArtifacts(output_s3_path="s3://bucket/output/"),
+            model_type=Model.NOVA_LITE_2,
+            region="us-east-1",
+        )
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            metrics = result.get_training_metrics()
+
+        self.assertEqual(metrics, [{"step": 1, "reward": 0.5}])
+
+
+class TestMTRLStatusManager(unittest.TestCase):
+    """Tests for MTRLStatusManager."""
+
+    def test_get_job_status_in_progress(self):
+        import sys
+        import types
+
+        from amzn_nova_forge.core.result.job_result import MTRLStatusManager
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.job_status = "InProgress"
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        manager = MTRLStatusManager(region="us-east-1")
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            status, raw = manager.get_job_status("mtrl-job-123")
+
+        self.assertEqual(status, JobStatus.IN_PROGRESS)
+        self.assertEqual(raw, "InProgress")
+
+    def test_get_job_status_completed(self):
+        import sys
+        import types
+
+        from amzn_nova_forge.core.result.job_result import MTRLStatusManager
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.job_status = "Completed"
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        manager = MTRLStatusManager(region="us-east-1")
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            status, raw = manager.get_job_status("mtrl-job-123")
+
+        self.assertEqual(status, JobStatus.COMPLETED)
+        self.assertEqual(raw, "Completed")
+
+    def test_get_job_status_caches_terminal_state(self):
+        import sys
+        import types
+
+        from amzn_nova_forge.core.result.job_result import MTRLStatusManager
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.job_status = "Completed"
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        manager = MTRLStatusManager(region="us-east-1")
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            manager.get_job_status("mtrl-job-123")
+            status, raw = manager.get_job_status("mtrl-job-123")
+
+        # Should only call API once due to caching
+        mock_agent_cls.get.assert_called_once()
+        self.assertEqual(status, JobStatus.COMPLETED)
+
+    def test_resolve_start_time(self):
+        import sys
+        import types
+
+        from amzn_nova_forge.core.result.job_result import MTRLStatusManager
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.creation_time = datetime(2026, 5, 20, 10, 0, 0)
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        manager = MTRLStatusManager(region="us-east-1")
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            start_time = manager.resolve_start_time("mtrl-job-123")
+
+        self.assertEqual(start_time, datetime(2026, 5, 20, 10, 0, 0))
+
+
+class TestMTRLLogMonitor(unittest.TestCase):
+    """Tests for MTRLLogMonitor."""
+
+    def test_from_job_id(self):
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        monitor = MTRLLogMonitor.from_job_id(job_id="mtrl-job-123", region="us-east-1")
+        self.assertEqual(monitor.job_id, "mtrl-job-123")
+        self.assertEqual(monitor._region, "us-east-1")
+
+    def test_show_logs_completed_job(self):
+        import sys
+        import types
+
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.job_status = "Completed"
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        monitor = MTRLLogMonitor(job_id="mtrl-job-123", region="us-east-1")
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            monitor.show_logs()
+
+        mock_rft_job.refresh.assert_called_once()
+        mock_rft_job.get_training_metrics.assert_called_once()
+        mock_rft_job.wait.assert_not_called()
+
+    def test_show_logs_running_job_calls_wait(self):
+        import sys
+        import types
+
+        from amzn_nova_forge.monitor.log_monitor import MTRLLogMonitor
+
+        mock_agent_module = types.ModuleType("sagemaker.train.agent_rft_job")
+        mock_rft_job = Mock()
+        mock_rft_job.job_status = "InProgress"
+        mock_agent_cls = Mock()
+        mock_agent_cls.get.return_value = mock_rft_job
+        mock_agent_module.AgentRFTJob = mock_agent_cls
+
+        monitor = MTRLLogMonitor(job_id="mtrl-job-123", region="us-east-1")
+
+        with patch.dict("sys.modules", {"sagemaker.train.agent_rft_job": mock_agent_module}):
+            monitor.show_logs(poll=10, timeout=120)
+
+        mock_rft_job.wait.assert_called_once_with(poll=10, timeout=120)
+
+
 if __name__ == "__main__":
     unittest.main()

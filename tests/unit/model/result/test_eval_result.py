@@ -462,6 +462,7 @@ class TestSMTJEvaluationResult(unittest.TestCase):
                 started_time=self.started_time,
                 eval_task=self.eval_task,
                 eval_output_path=self.eval_output_path,
+                region=None,
             )
 
     @patch("amzn_nova_forge.core.result.job_result.json.load")
@@ -530,6 +531,7 @@ class TestSMTJEvaluationResult(unittest.TestCase):
                 started_time=self.started_time,
                 eval_task=self.eval_task,
                 eval_output_path=self.eval_output_path,
+                region=None,
             )
 
     def test_get_method_returns_dict(self):
@@ -635,6 +637,186 @@ class TestRegionPropagation(unittest.TestCase):
         )
 
         mock_boto3.client.assert_called_with("sagemaker", region_name="eu-west-1")
+
+
+class TestSMTJEvaluationResultMTRL(unittest.TestCase):
+    """Tests for MTRL eval pipeline status polling."""
+
+    @patch("boto3.client")
+    def test_mtrl_eval_uses_pipeline_status_manager(self, mock_boto3):
+        mock_boto3.return_value = Mock()
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:us-east-1:123456789012:pipeline/SagemakerEvaluation-MTRLEvaluation/execution/abc123",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+        )
+        from amzn_nova_forge.core.result.job_result import MTRLStatusManager
+
+        self.assertIsInstance(result._status_manager, MTRLStatusManager)
+
+    @patch("boto3.client")
+    def test_mtrl_eval_polls_pipeline_execution(self, mock_boto3):
+        mock_sm_client = Mock()
+        mock_sm_client.describe_pipeline_execution.return_value = {
+            "PipelineExecutionStatus": "Executing"
+        }
+        mock_boto3.return_value = mock_sm_client
+
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:us-east-1:123456789012:pipeline/Test/execution/xyz",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+        )
+
+        status, raw = result.get_job_status()
+        self.assertEqual(status, JobStatus.IN_PROGRESS)
+        self.assertEqual(raw, "Executing")
+
+    @patch("boto3.client")
+    def test_mtrl_eval_pipeline_succeeded(self, mock_boto3):
+        mock_sm_client = Mock()
+        mock_sm_client.describe_pipeline_execution.return_value = {
+            "PipelineExecutionStatus": "Succeeded"
+        }
+        mock_boto3.return_value = mock_sm_client
+
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:us-east-1:123456789012:pipeline/Test/execution/xyz",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+        )
+
+        status, raw = result.get_job_status()
+        self.assertEqual(status, JobStatus.COMPLETED)
+        self.assertEqual(raw, "Succeeded")
+
+    @patch("boto3.client")
+    def test_mtrl_eval_pipeline_failed(self, mock_boto3):
+        mock_sm_client = Mock()
+        mock_sm_client.describe_pipeline_execution.return_value = {
+            "PipelineExecutionStatus": "Failed"
+        }
+        mock_boto3.return_value = mock_sm_client
+
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:us-east-1:123456789012:pipeline/Test/execution/xyz",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+        )
+
+        status, raw = result.get_job_status()
+        self.assertEqual(status, JobStatus.FAILED)
+
+    @patch("boto3.client")
+    def test_non_mtrl_eval_uses_smtj_status_manager(self, mock_boto3):
+        mock_boto3.return_value = Mock()
+        result = SMTJEvaluationResult(
+            job_id="some-training-job",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.MMLU,
+            eval_output_path="s3://bucket/output/",
+            sagemaker_client=Mock(),
+            s3_client=Mock(),
+        )
+        from amzn_nova_forge.core.result.job_result import SMTJStatusManager
+
+        self.assertIsInstance(result._status_manager, SMTJStatusManager)
+
+    @patch("boto3.client")
+    def test_mtrl_eval_extracts_region_from_arn(self, mock_boto3):
+        mock_sm_client = Mock()
+        mock_sm_client.describe_pipeline_execution.return_value = {
+            "PipelineExecutionStatus": "Executing"
+        }
+        mock_boto3.return_value = mock_sm_client
+
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:eu-west-1:123456789012:pipeline/Test/execution/xyz",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+            region="us-east-1",
+        )
+
+        result.get_job_status()
+        mock_boto3.assert_any_call("sagemaker", region_name="eu-west-1")
+
+    @patch("boto3.client")
+    def test_mtrl_eval_resolve_start_time_pipeline(self, mock_boto3):
+        from datetime import timezone
+
+        mock_sm_client = Mock()
+        mock_sm_client.describe_pipeline_execution.return_value = {
+            "CreationTime": datetime(2026, 6, 3, 18, 0, 0, tzinfo=timezone.utc)
+        }
+        mock_boto3.return_value = mock_sm_client
+
+        from amzn_nova_forge.core.result.job_result import MTRLStatusManager
+
+        mgr = MTRLStatusManager(region="us-east-1")
+        result = mgr.resolve_start_time(
+            "arn:aws:sagemaker:us-east-1:123456789012:pipeline/Test/execution/xyz"
+        )
+        self.assertEqual(result, datetime(2026, 6, 3, 18, 0, 0, tzinfo=timezone.utc))
+
+    @patch("boto3.client")
+    def test_dump_pipeline_arn_with_job_name(self, mock_boto3):
+        import os
+
+        mock_boto3.return_value = Mock()
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:us-east-1:123456789012:pipeline/Eval/execution/abc123",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+        )
+        result._job_name = "my-eval"
+        path = result.dump()
+        self.assertEqual(str(path), "my-eval-abc123_SMTJServerless.json")
+        os.remove(str(path))
+
+    @patch("boto3.client")
+    def test_dump_pipeline_arn_without_job_name(self, mock_boto3):
+        import os
+
+        mock_boto3.return_value = Mock()
+        result = SMTJEvaluationResult(
+            job_id="arn:aws:sagemaker:us-east-1:123456789012:pipeline/Eval/execution/xyz789",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            eval_output_path="s3://bucket/output/",
+            s3_client=Mock(),
+        )
+        path = result.dump()
+        self.assertEqual(str(path), "xyz789_SMTJServerless.json")
+        os.remove(str(path))
+
+    @patch("boto3.client")
+    def test_dump_regular_job_id(self, mock_boto3):
+        import os
+
+        mock_boto3.return_value = Mock()
+        result = SMTJEvaluationResult(
+            job_id="my-training-job-123",
+            started_time=datetime.now(),
+            eval_task=EvaluationTask.MMLU,
+            eval_output_path="s3://bucket/output/",
+            sagemaker_client=Mock(),
+            s3_client=Mock(),
+        )
+        path = result.dump()
+        self.assertEqual(str(path), "my-training-job-123_SMTJ.json")
+        os.remove(str(path))
 
 
 if __name__ == "__main__":

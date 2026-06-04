@@ -40,6 +40,7 @@ from amzn_nova_forge.core.result import (
     SMTJTrainingResult,
     TrainingResult,
 )
+from amzn_nova_forge.core.result.job_result import JobStatus
 from amzn_nova_forge.core.runtime import RuntimeManager
 from amzn_nova_forge.core.training_overrides import TrainingOverrides
 from amzn_nova_forge.core.types import (
@@ -49,7 +50,7 @@ from amzn_nova_forge.core.types import (
     RecipeConfig,
     validate_region,
 )
-from amzn_nova_forge.manager.runtime_manager import SMHPRuntimeManager
+from amzn_nova_forge.manager.runtime_manager import SMHPRuntimeManager, SMTJServerlessRuntimeManager
 from amzn_nova_forge.model.nova_model_customizer_util import set_output_s3_path
 from amzn_nova_forge.monitor.log_monitor import CloudWatchLogMonitor
 from amzn_nova_forge.recipe.recipe_builder import RecipeBuilder
@@ -58,6 +59,10 @@ from amzn_nova_forge.trainer.utils.batch_trace import run as batch_trace_run
 from amzn_nova_forge.util.data_mixing import DataMixing
 from amzn_nova_forge.util.data_utils import is_multimodal_data
 from amzn_nova_forge.util.logging import logger
+from amzn_nova_forge.util.metric_util import (
+    _build_and_upload_training_metrics_csv,
+    _parse_user_time,
+)
 from amzn_nova_forge.util.recipe import load_recipe_templates
 from amzn_nova_forge.util.sagemaker import get_model_artifacts
 from amzn_nova_forge.validation.endpoint_validator import is_sagemaker_arn
@@ -82,6 +87,7 @@ class ForgeTrainer:
         infra: RuntimeManager,
         training_data_s3_path: Optional[str] = None,
         model_s3_path: Optional[str] = None,
+        model_arn: Optional[str] = None,
         data_mixing_enabled: bool = False,
         holdout_data_s3_path: Optional[str] = None,
         val_check_interval: Optional[int] = None,
@@ -95,6 +101,7 @@ class ForgeTrainer:
         self.method = method
         self.infra = infra
         self.training_data_s3_path = training_data_s3_path
+        self.model_arn = model_arn
         self.model_s3_path = model_s3_path
         self.holdout_data_s3_path = holdout_data_s3_path
         self.hub_content_version = hub_content_version
@@ -126,11 +133,23 @@ class ForgeTrainer:
 
         self._platform = infra.platform
 
-        if self._platform == Platform.SMTJServerless and self.model_s3_path is not None:
-            if not is_sagemaker_arn(self.model_s3_path):
+        if self._platform == Platform.SMTJServerless:
+            if self.model_s3_path is not None and self.model_arn is not None:
                 raise ValueError(
-                    f"For SMTJServerless, model_path must be a SageMaker model package ARN, "
-                    f"got: '{self.model_s3_path}'."
+                    "Cannot specify both model_s3_path and model_arn. "
+                    "For SMTJServerless, use model_arn with a model package ARN."
+                )
+            if self.model_s3_path is not None:
+                if not is_sagemaker_arn(self.model_s3_path):
+                    raise ValueError(
+                        f"For SMTJServerless, model_s3_path must be a SageMaker model package ARN, "
+                        f"got: '{self.model_s3_path}'. Use model_arn instead."
+                    )
+                self.model_arn = self.model_s3_path
+                self.model_s3_path = None
+            if self.model_arn is not None and not is_sagemaker_arn(self.model_arn):
+                raise ValueError(
+                    f"model_arn must be a SageMaker model package ARN, got: '{self.model_arn}'."
                 )
         if self._platform == Platform.BEDROCK and self.model_s3_path is not None:
             logger.warning(
@@ -207,7 +226,7 @@ class ForgeTrainer:
             model=model,
             method=method,
             data_s3_path=training_data_s3_path,
-            model_path=model_s3_path,
+            model_path=self.model_arn or self.model_s3_path,
             output_s3_path=self.output_s3_path,
             instance_type=infra.instance_type,
             instance_count=infra.instance_count,
@@ -265,6 +284,65 @@ class ForgeTrainer:
             validate_rft_lambda_name(rft_lambda_arn.split(":")[-1], self._platform)
             logger.info(f"Using reward lambda: {rft_lambda_arn}")
 
+        # MTRL serverless: skip recipe generation, call directly
+        is_mtrl_serverless = self._platform == Platform.SMTJServerless and self.method in (
+            TrainingMethod.RFT_MULTITURN_LORA,
+            TrainingMethod.RFT_MULTITURN_FULL,
+        )
+        if is_mtrl_serverless:
+            if not self._config.mlflow_monitor or not self._config.mlflow_monitor.tracking_uri:
+                raise ValueError(
+                    "MLflow configuration is required for AgentRFT jobs. "
+                    "Please provide an mlflow_monitor with a valid tracking_uri when "
+                    "using RFT_MULTITURN methods on the SMTJServerless platform."
+                )
+
+            if dry_run:
+                return None
+
+            mtrl_infra = cast(SMTJServerlessRuntimeManager, self.infra)
+            mlflow_uri = self._config.mlflow_monitor.tracking_uri
+
+            unique_job_name = f"{job_name}-{uuid.uuid4().hex[:8]}"[:48].rstrip("-")
+            start_time = datetime.now(timezone.utc)
+
+            job_id = mtrl_infra.execute_mtrl(
+                model=self.model,
+                job_name=unique_job_name,
+                data_s3_path=self.training_data_s3_path,
+                output_s3_path=self.output_s3_path,
+                mlflow_tracking_uri=mlflow_uri,
+                overrides=dict(overrides) if overrides else None,
+                model_path=self.model_arn,
+            )
+
+            training_result: TrainingResult = SMTJTrainingResult(
+                job_id=job_id,
+                started_time=start_time,
+                method=self.method,
+                model_type=self.model,
+                model_artifacts=get_model_artifacts(
+                    job_name=job_id,
+                    infra=self.infra,
+                    region=self.region,
+                ),
+                region=self.region,
+            )
+
+            logger.info(f"Started MTRL job '{training_result.job_id}'.")
+            if training_result.model_artifacts.output_s3_path:
+                logger.info(f"Output S3 path is: {training_result.model_artifacts.output_s3_path}.")
+
+            persist_result(
+                self._cache_context,
+                training_result,
+                job_name=job_name,
+                job_type="train",
+                recipe_path=recipe_path,
+                overrides=overrides or {},
+            )
+            return training_result
+
         recipe_builder = RecipeBuilder(
             region=self.region,
             job_name=job_name,
@@ -276,7 +354,7 @@ class ForgeTrainer:
             infra=self.infra,
             data_s3_path=self.training_data_s3_path,
             output_s3_path=self.output_s3_path,
-            model_path=self.model_s3_path,
+            model_path=self.model_arn or self.model_s3_path,
             rft_lambda_arn=rft_lambda_arn,
             validation_data_s3_path=self.holdout_data_s3_path,
             val_check_interval=self.val_check_interval,
@@ -334,7 +412,6 @@ class ForgeTrainer:
 
         job_id = self.infra.execute(job_config=JobConfig(**job_config_params))
 
-        training_result: TrainingResult
         if self._platform in (Platform.SMTJ, Platform.SMTJServerless):
             training_result = SMTJTrainingResult(
                 job_id=job_id,
@@ -434,7 +511,7 @@ class ForgeTrainer:
             infra=self.infra,
             data_s3_path=self.training_data_s3_path,
             output_s3_path=self.output_s3_path,
-            model_path=self.model_s3_path,
+            model_path=self.model_arn or self.model_s3_path,
             validation_data_s3_path=self.holdout_data_s3_path,
             val_check_interval=self.val_check_interval,
             data_mixing_instance=self.data_mixing,
@@ -454,8 +531,15 @@ class ForgeTrainer:
         limit: Optional[int] = None,
         start_from_head: bool = False,
         end_time: Optional[int] = None,
+        poll: int = 30,
+        timeout: int = 7200,
     ) -> None:
-        """Stream CloudWatch logs for a training job.
+        """Stream logs or wait for a training job.
+
+        For MTRL jobs, delegates to ``job_result.wait()`` which displays a
+        rich progress panel with status, metrics, and links.
+
+        For all other jobs, streams CloudWatch logs.
 
         Provide either a ``job_result`` or explicit ``job_id`` + ``started_time``.
 
@@ -463,6 +547,15 @@ class ForgeTrainer:
             ValueError: If neither ``job_result`` nor both ``job_id`` and
                 ``started_time`` are provided.
         """
+        # MTRL: delegate to wait() which shows progress
+        if (
+            job_result is not None
+            and isinstance(job_result, SMTJTrainingResult)
+            and job_result._is_mtrl
+        ):
+            job_result.wait(poll=poll, timeout=timeout)
+            return
+
         resolved_job_id = job_result.job_id if job_result else job_id
         resolved_started = job_result.started_time if job_result else started_time
 
@@ -542,4 +635,132 @@ class ForgeTrainer:
             output_path=output_path,
             s3_client=self._s3_client,
             cache_dir=cache_dir,
+        )
+
+    @_telemetry_emitter(Feature.TRAINING, "generate_training_metrics_csv")
+    def generate_training_metrics_csv(
+        self,
+        job_result: Optional[SMHPTrainingResult] = None,
+        job_id: Optional[str] = None,
+        started_time=None,
+        end_time=None,
+        output_s3_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """Generate step-wise training metrics CSV for an SMHP SFT job.
+
+        Fetches CloudWatch logs for the specified job, extracts step-level
+        training metrics (step number, epoch number, training loss), and
+        uploads a ``step_wise_training_metrics.csv`` to the job's output S3 path.
+
+        Args:
+            job_result: An SMHPTrainingResult from a completed training job.
+            job_id: The SMHP training job ID (used if job_result isn't provided).
+            started_time: Job start time for log filtering. Accepts a datetime
+                object or an ISO date str (e.g. "2025-05-26"). Defaults to 7 days.
+            end_time: Optional end time to bound the log search. If not provided,
+                searches up to the current time.
+            output_s3_path: S3 URI for output. Defaults to ForgeTrainer's output path.
+
+        Returns:
+            S3 URI of the uploaded CSV, or None (no logs/metrics found).
+
+        Raises:
+            ValueError: If platform is not SMHP, method is not SFT_LORA/SFT_FULL,
+                or required parameters are missing.
+        """
+        # Validate platform
+        if self._platform != Platform.SMHP:
+            raise ValueError(
+                "generate_training_metrics_csv is only supported for SMHP platform. "
+                f"Current platform: {self._platform.value}"
+            )
+
+        # Validate method
+        if self.method not in (TrainingMethod.SFT_LORA, TrainingMethod.SFT_FULL):
+            raise ValueError(
+                "generate_training_metrics_csv is only supported for SFT training methods "
+                f"(SFT_LORA, SFT_FULL). Current method: {self.method.value}"
+            )
+
+        # Extract parameters from job_result or use standalone params
+        resolved_output_s3_path: Optional[str] = None
+        resolved_job_id: Optional[str] = None
+        if job_result is not None:
+            resolved_job_id = job_result.job_id
+            resolved_started_time = job_result.started_time
+            resolved_cluster_name = job_result.cluster_name
+            resolved_namespace = job_result.namespace
+            resolved_output_s3_path = output_s3_path or job_result.model_artifacts.output_s3_path
+        else:
+            resolved_job_id = job_id
+            resolved_started_time = started_time
+            resolved_cluster_name = cast(SMHPRuntimeManager, self.infra).cluster_name
+            resolved_namespace = cast(SMHPRuntimeManager, self.infra).namespace
+            resolved_output_s3_path = output_s3_path or self.output_s3_path
+
+        if not resolved_job_id:
+            raise ValueError("No job_id provided. Pass either a job_result object or a job_id.")
+
+        if not resolved_output_s3_path:
+            raise ValueError(
+                "output_s3_path is required but was not provided and could not be "
+                "extracted from job_result."
+            )
+
+        # Check job status and emit warnings
+        if job_result is not None:
+            try:
+                job_status, raw_status = job_result.get_job_status()
+                if job_status == JobStatus.IN_PROGRESS:
+                    logger.warning(
+                        "Job '%s' is still in progress (status: %s). "
+                        "Training metrics may be incomplete.",
+                        resolved_job_id,
+                        raw_status,
+                    )
+                elif job_status == JobStatus.FAILED:
+                    logger.warning(
+                        "Job '%s' has failed (status: %s). Training metrics may be partial.",
+                        resolved_job_id,
+                        raw_status,
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not determine job status for '%s'. "
+                    "Proceeding with best-effort log parsing.",
+                    resolved_job_id,
+                )
+
+        # Fetch logs from CloudWatch
+        resolved_started_time_dt = _parse_user_time(resolved_started_time)
+        started_time_ms = int(resolved_started_time_dt.timestamp() * 1000)
+
+        end_time_ms = None
+        if end_time is not None:
+            resolved_end_time_dt = _parse_user_time(end_time)
+            end_time_ms = int(resolved_end_time_dt.timestamp() * 1000)
+
+        # Create a monitor object and retrieve relevant job logs
+        logger.info(
+            "Fetching CloudWatch logs for job '%s' - this can take a few minutes.",
+            resolved_job_id,
+        )
+        monitor = CloudWatchLogMonitor(
+            job_id=resolved_job_id,
+            platform=Platform.SMHP,
+            started_time=started_time_ms,
+            region=self.region,
+            cluster_name=resolved_cluster_name,
+            namespace=resolved_namespace,
+        )
+        log_events = monitor.get_logs(end_time=end_time_ms)
+        logger.info("Retrieved %d log events.", len(log_events) if log_events else 0)
+
+        logger.info("Parsing training metrics and generating CSV. ")
+        return _build_and_upload_training_metrics_csv(
+            job_id=resolved_job_id,
+            log_events=log_events,
+            output_s3_path=resolved_output_s3_path,
+            training_method=self.method,
+            region=self.region,
         )

@@ -207,6 +207,16 @@ print(f"Uploaded to: {custom_env.s3_uri}")
 - `get_configuration()`: Get infrastructure config
 - `get_recipe_overrides()`: Get recipe overrides for training
 
-**Note:** RFT multiturn only supports SageMaker HyperPod (SMHP) platform and Nova 2.0 models (NOVA_LITE_2).
+**Note:** RFT multiturn supports SageMaker HyperPod (SMHP) and SMTJServerless platforms with Nova 2.0 models (NOVA_LITE_2).
+
+---
+
+### Platform Requirements
+
+#### MLFlow Required for MTRL on SMTJServerless
+
+MTRL training and evaluation on `SMTJServerless` require `ForgeConfig.mlflow_monitor` with a valid `tracking_uri` — raises `ValueError` if missing.
+
+MLFlow is optional on SMHP.
 
 ---

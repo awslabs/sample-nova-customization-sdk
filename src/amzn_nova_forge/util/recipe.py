@@ -756,14 +756,14 @@ def load_recipe_templates(
         and rft_multiturn_infra
     )
 
-    if is_rft_multiturn_training or is_rft_multiturn_eval:
+    if (is_rft_multiturn_training or is_rft_multiturn_eval) and platform != Platform.SMTJServerless:
         if not rft_multiturn_infra:
             raise ValueError(
                 f"rft_multiturn_infra is required for RFT multiturn {'training' if is_rft_multiturn_training else 'evaluation'}"
             )
         if platform != Platform.SMHP:
             raise ValueError(
-                f"RFT multiturn {'training' if is_rft_multiturn_training else 'eval'} is only supported on HyperPod (SMHP)"
+                f"RFT multiturn {'training' if is_rft_multiturn_training else 'eval'} is only supported on HyperPod (SMHP) or SMTJServerless"
             )
 
         # RFT multiturn requires instance_type (only supported on SMHP)

@@ -444,8 +444,6 @@ class TestSMTJServerlessRuntimeManager(unittest.TestCase):
         self.assertEqual(config["EvaluationType"], "BenchmarkEvaluation")
         self.assertNotIn("EvaluatorArn", config)
 
-    # --- _resolve_base_model_arn tests ---
-
     @patch(
         "amzn_nova_forge.manager.runtime_manager.get_hub_content",
         return_value={"HubContentArn": "arn:hub:content"},
@@ -461,8 +459,6 @@ class TestSMTJServerlessRuntimeManager(unittest.TestCase):
             region="us-east-1",
             hub_content_version=None,
         )
-
-    # --- execute tests ---
 
     @patch("amzn_nova_forge.manager.runtime_manager.get_hub_content")
     @patch("sagemaker.ai_registry.dataset.DataSet")
@@ -665,6 +661,85 @@ class TestSMTJServerlessRuntimeManager(unittest.TestCase):
         call_kwargs = manager.sagemaker_client.create_training_job.call_args.kwargs
         self.assertNotIn("InputDataConfig", call_kwargs)
         mock_dataset_cls.create.assert_not_called()
+
+    @patch("amzn_nova_forge.manager.runtime_manager.get_hub_content")
+    @patch("sagemaker.ai_registry.dataset.DataSet")
+    def test_execute_eval_with_sagemaker_arn_includes_source_model_package(
+        self, mock_dataset_cls, mock_hub_content
+    ):
+        """Eval job with a SageMaker ARN sets both ModelPackageGroupArn and SourceModelPackageArn."""
+        manager = self._create_manager()
+        mock_hub_content.return_value = {"HubContentArn": self.mock_hub_content_arn}
+        manager.sagemaker_client.create_training_job.return_value = {
+            "TrainingJobArn": "arn:aws:sagemaker:us-east-1:123456789012:training-job/test-job"
+        }
+        model_package_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/group/1"
+        recipe = {
+            "run": {
+                "model_type": "amazon.nova-2-lite-v1:0:256k",
+                "model_name_or_path": model_package_arn,
+            },
+            "evaluation": {"task": "mmlu"},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(recipe, f)
+            recipe_path = f.name
+        try:
+            job_config = JobConfig(
+                job_name="test-eval-job",
+                image_uri="",
+                recipe_path=recipe_path,
+                output_s3_path="s3://output-bucket/output",
+                method=TrainingMethod.EVALUATION,
+            )
+            manager.execute(job_config)
+        finally:
+            os.unlink(recipe_path)
+
+        call_kwargs = manager.sagemaker_client.create_training_job.call_args.kwargs
+        self.assertIn("ModelPackageConfig", call_kwargs)
+        self.assertEqual(
+            call_kwargs["ModelPackageConfig"]["SourceModelPackageArn"],
+            model_package_arn,
+        )
+        self.assertIn("ModelPackageGroupArn", call_kwargs["ModelPackageConfig"])
+        self.assertEqual(
+            call_kwargs["ModelPackageConfig"]["ModelPackageGroupArn"],
+            manager.model_package_group_arn,
+        )
+
+    @patch("amzn_nova_forge.manager.runtime_manager.get_hub_content")
+    @patch("sagemaker.ai_registry.dataset.DataSet")
+    def test_execute_eval_without_sagemaker_arn_omits_model_package_config(
+        self, mock_dataset_cls, mock_hub_content
+    ):
+        """Eval job without a SageMaker ARN omits ModelPackageConfig entirely."""
+        manager = self._create_manager()
+        mock_hub_content.return_value = {"HubContentArn": self.mock_hub_content_arn}
+        manager.sagemaker_client.create_training_job.return_value = {
+            "TrainingJobArn": "arn:aws:sagemaker:us-east-1:123456789012:training-job/test-job"
+        }
+        recipe = {
+            "run": {"model_type": "amazon.nova-2-lite-v1:0:256k"},
+            "evaluation": {"task": "mmlu"},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(recipe, f)
+            recipe_path = f.name
+        try:
+            job_config = JobConfig(
+                job_name="test-eval-job",
+                image_uri="",
+                recipe_path=recipe_path,
+                output_s3_path="s3://output-bucket/output",
+                method=TrainingMethod.EVALUATION,
+            )
+            manager.execute(job_config)
+        finally:
+            os.unlink(recipe_path)
+
+        call_kwargs = manager.sagemaker_client.create_training_job.call_args.kwargs
+        self.assertNotIn("ModelPackageConfig", call_kwargs)
 
     @patch("amzn_nova_forge.manager.runtime_manager.get_hub_content")
     @patch("sagemaker.ai_registry.dataset.DataSet")
@@ -976,8 +1051,6 @@ class TestSMTJServerlessRuntimeManager(unittest.TestCase):
         finally:
             os.unlink(recipe_path)
 
-    # --- cleanup tests ---
-
     def test_cleanup_success(self):
         manager = self._create_manager()
         manager.cleanup("test-job")
@@ -986,14 +1059,35 @@ class TestSMTJServerlessRuntimeManager(unittest.TestCase):
         )
         manager.sagemaker_client.close.assert_called_once()
 
+    def test_cleanup_is_mtrl_false_calls_stop_training_job(self):
+        manager = self._create_manager()
+        manager.cleanup("test-job", is_mtrl=False)
+        manager.sagemaker_client.stop_training_job.assert_called_once_with(
+            TrainingJobName="test-job"
+        )
+        manager.sagemaker_client.close.assert_called_once()
+
+    @patch.object(SMTJServerlessRuntimeManager, "_cleanup_mtrl")
+    def test_cleanup_is_mtrl_true_calls_cleanup_mtrl(self, mock_cleanup_mtrl):
+        manager = self._create_manager()
+        manager.cleanup("mtrl-job-123", is_mtrl=True)
+        mock_cleanup_mtrl.assert_called_once_with("mtrl-job-123")
+        manager.sagemaker_client.stop_training_job.assert_not_called()
+
+    @patch.object(SMTJServerlessRuntimeManager, "_cleanup_mtrl")
+    def test_cleanup_is_mtrl_true_raises_on_error(self, mock_cleanup_mtrl):
+        manager = self._create_manager()
+        mock_cleanup_mtrl.side_effect = Exception("MTRL cleanup failed")
+        with self.assertRaises(Exception) as ctx:
+            manager.cleanup("mtrl-job-123", is_mtrl=True)
+        self.assertEqual(str(ctx.exception), "MTRL cleanup failed")
+
     def test_cleanup_raises_on_error(self):
         manager = self._create_manager()
         manager.sagemaker_client.stop_training_job.side_effect = Exception("Cleanup failed")
         with self.assertRaises(Exception) as ctx:
             manager.cleanup("test-job")
         self.assertEqual(str(ctx.exception), "Cleanup failed")
-
-    # --- required_calling_role_permissions tests ---
 
     def test_required_calling_role_permissions(self):
         perms = SMTJServerlessRuntimeManager.required_calling_role_permissions(
@@ -1211,6 +1305,7 @@ class TestMethodToServerlessConfig(unittest.TestCase):
             TrainingMethod.DPO_LORA,
             TrainingMethod.DPO_FULL,
             TrainingMethod.RFT_LORA,
+            TrainingMethod.RFT_MULTITURN_LORA,
             # TrainingMethod.RFT_FULL,
         }
         self.assertEqual(set(_METHOD_TO_SERVERLESS_CONFIG.keys()), expected)
@@ -1220,6 +1315,7 @@ class TestMethodToServerlessConfig(unittest.TestCase):
             TrainingMethod.SFT_LORA,
             TrainingMethod.DPO_LORA,
             TrainingMethod.RFT_LORA,
+            TrainingMethod.RFT_MULTITURN_LORA,
         ):
             _, peft = _METHOD_TO_SERVERLESS_CONFIG[method]
             self.assertEqual(peft, "LORA")
@@ -1610,6 +1706,350 @@ class TestExtractHyperparameters(unittest.TestCase):
         recipe = {"run": {"name": "my-job"}}
         result = self.manager._extract_hyperparameters(recipe, data_mixing_config={})
         self.assertNotIn("customer_data_percent", result)
+
+
+class TestSMTJServerlessMTRL(unittest.TestCase):
+    """Tests for MTRL operations on SMTJServerlessRuntimeManager."""
+
+    MOCK_AGENT_CORE_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"
+    MOCK_LAMBDA_ARN = "arn:aws:lambda:us-east-1:123456789012:function:my-reward-fn"
+    MOCK_MODEL_PACKAGE_ARN = "arn:aws:sagemaker:us-east-1:123456789012:model-package/grp/1"
+
+    @patch.object(SMTJServerlessRuntimeManager, "setup", return_value=None)
+    def test_init_with_agent_core_arn(self, mock_setup):
+        manager = SMTJServerlessRuntimeManager(
+            model_package_group_name="test-group",
+            agent_core_arn=self.MOCK_AGENT_CORE_ARN,
+        )
+        self.assertEqual(manager.agent_core_arn, self.MOCK_AGENT_CORE_ARN)
+
+    @patch.object(SMTJServerlessRuntimeManager, "setup", return_value=None)
+    def test_init_with_intermediate_model_package_group(self, mock_setup):
+        manager = SMTJServerlessRuntimeManager(
+            model_package_group_name="test-group",
+            intermediate_model_package_group_name="test-checkpoints",
+        )
+        self.assertEqual(manager.intermediate_model_package_group_name, "test-checkpoints")
+
+    @patch.object(SMTJServerlessRuntimeManager, "setup", return_value=None)
+    def test_init_with_rft_lambda(self, mock_setup):
+        manager = SMTJServerlessRuntimeManager(
+            model_package_group_name="test-group",
+            rft_lambda=self.MOCK_LAMBDA_ARN,
+        )
+        self.assertEqual(manager.rft_lambda, self.MOCK_LAMBDA_ARN)
+
+    def _create_mtrl_ops(self, agent_core_arn=None, rft_lambda=None):
+        from amzn_nova_forge.manager.mtrl_manager import MTRLOperations
+
+        ops = MTRLOperations.__new__(MTRLOperations)
+        ops.agent_core_arn = agent_core_arn
+        ops.rft_lambda = rft_lambda
+        ops.model_package_group_arn = (
+            "arn:aws:sagemaker:us-east-1:123456789012:model-package-group/grp"
+        )
+        ops.execution_role = "arn:aws:iam::123456789012:role/role"
+        ops.subnets = None
+        ops.security_group_ids = None
+        ops.kms_key_id = None
+        ops.region = "us-east-1"
+        return ops
+
+    def _mock_sagemaker_modules(self):
+        import types
+
+        mock_sm_train = types.ModuleType("sagemaker.train")
+        mock_sm_train_mtrl = types.ModuleType("sagemaker.train.multi_turn_rl_trainer")
+        mock_sm_core = types.ModuleType("sagemaker.core")
+        mock_sm_core_resources = types.ModuleType("sagemaker.core.resources")
+
+        self._mock_trainer_cls = MagicMock()
+        self._mock_trainer_instance = MagicMock()
+        self._mock_trainer_cls.return_value = self._mock_trainer_instance
+        self._mock_model_package_cls = MagicMock()
+
+        mock_sm_train_mtrl.MultiTurnRLTrainer = self._mock_trainer_cls
+        mock_sm_core_resources.ModelPackage = self._mock_model_package_cls
+
+        return {
+            "sagemaker.train": mock_sm_train,
+            "sagemaker.train.multi_turn_rl_trainer": mock_sm_train_mtrl,
+            "sagemaker.core": mock_sm_core,
+            "sagemaker.core.resources": mock_sm_core_resources,
+        }
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_with_agent_core(self, _mock_logger):
+        ops = self._create_mtrl_ops(agent_core_arn=self.MOCK_AGENT_CORE_ARN)
+        modules = self._mock_sagemaker_modules()
+
+        mock_job = MagicMock()
+        mock_job.job_name = "test-job-123"
+        mock_job.job_arn = "arn:aws:sagemaker:us-east-1:123456789012:job/test-job-123"
+        self._mock_trainer_instance.train.return_value = mock_job
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                result = ops.execute_mtrl(
+                    model=Model.NOVA_LITE_2,
+                    job_name="test-job",
+                    data_s3_path="s3://bucket/data",
+                    output_s3_path="s3://bucket/output",
+                )
+
+        self.assertEqual(result, "test-job-123")
+        call_kwargs = self._mock_trainer_cls.call_args[1]
+        self.assertEqual(call_kwargs["agent_env"], self.MOCK_AGENT_CORE_ARN)
+        self.assertEqual(call_kwargs["model"], Model.NOVA_LITE_2.hub_content_name)
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_with_lambda(self, _mock_logger):
+        ops = self._create_mtrl_ops(rft_lambda=self.MOCK_LAMBDA_ARN)
+        modules = self._mock_sagemaker_modules()
+
+        mock_job = MagicMock()
+        mock_job.job_name = "lambda-job"
+        mock_job.job_arn = "arn:aws:sagemaker:us-east-1:123456789012:job/lambda-job"
+        self._mock_trainer_instance.train.return_value = mock_job
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                result = ops.execute_mtrl(
+                    model=Model.NOVA_LITE_2,
+                    job_name="lambda-job",
+                    data_s3_path="s3://bucket/data",
+                )
+
+        call_kwargs = self._mock_trainer_cls.call_args[1]
+        self.assertEqual(call_kwargs["agent_env"], self.MOCK_LAMBDA_ARN)
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_with_model_path_resolves_model_package(self, _mock_logger):
+        ops = self._create_mtrl_ops(agent_core_arn=self.MOCK_AGENT_CORE_ARN)
+        modules = self._mock_sagemaker_modules()
+
+        mock_model_package = MagicMock()
+        self._mock_model_package_cls.get.return_value = mock_model_package
+
+        mock_job = MagicMock()
+        mock_job.job_name = "iter-job"
+        mock_job.job_arn = "arn:aws:sagemaker:us-east-1:123456789012:job/iter-job"
+        self._mock_trainer_instance.train.return_value = mock_job
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                result = ops.execute_mtrl(
+                    model=Model.NOVA_LITE_2,
+                    job_name="iter-job",
+                    data_s3_path="s3://bucket/data",
+                    model_path=self.MOCK_MODEL_PACKAGE_ARN,
+                )
+
+        self.assertEqual(result, "iter-job")
+        self._mock_model_package_cls.get.assert_called_once_with(self.MOCK_MODEL_PACKAGE_ARN)
+        call_kwargs = self._mock_trainer_cls.call_args[1]
+        self.assertEqual(call_kwargs["model"], mock_model_package)
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_without_model_path_uses_base_model(self, _mock_logger):
+        ops = self._create_mtrl_ops(agent_core_arn=self.MOCK_AGENT_CORE_ARN)
+        modules = self._mock_sagemaker_modules()
+
+        mock_job = MagicMock()
+        mock_job.job_name = "base-job"
+        mock_job.job_arn = "arn:aws:sagemaker:us-east-1:123456789012:job/base-job"
+        self._mock_trainer_instance.train.return_value = mock_job
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                ops.execute_mtrl(
+                    model=Model.NOVA_LITE_2,
+                    job_name="base-job",
+                    data_s3_path="s3://bucket/data",
+                )
+
+        self._mock_model_package_cls.get.assert_not_called()
+        call_kwargs = self._mock_trainer_cls.call_args[1]
+        self.assertEqual(call_kwargs["model"], Model.NOVA_LITE_2.hub_content_name)
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_agent_core_takes_priority_over_lambda(self, _mock_logger):
+        ops = self._create_mtrl_ops(
+            agent_core_arn=self.MOCK_AGENT_CORE_ARN,
+            rft_lambda=self.MOCK_LAMBDA_ARN,
+        )
+        modules = self._mock_sagemaker_modules()
+
+        mock_job = MagicMock()
+        mock_job.job_name = "priority-job"
+        mock_job.job_arn = "arn:aws:sagemaker:us-east-1:123456789012:job/priority-job"
+        self._mock_trainer_instance.train.return_value = mock_job
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                ops.execute_mtrl(
+                    model=Model.NOVA_LITE_2,
+                    job_name="priority-job",
+                    data_s3_path="s3://bucket/data",
+                )
+
+        call_kwargs = self._mock_trainer_cls.call_args[1]
+        self.assertEqual(call_kwargs["agent_env"], self.MOCK_AGENT_CORE_ARN)
+
+
+class TestSMTJServerlessMTRLEval(unittest.TestCase):
+    """Tests for MTRLOperations.execute_mtrl_eval."""
+
+    MOCK_AGENT_CORE_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"
+    MOCK_MODEL_PACKAGE_ARN = "arn:aws:sagemaker:us-east-1:123456789012:model-package/grp/1"
+
+    def _create_mtrl_ops(self):
+        from amzn_nova_forge.manager.mtrl_manager import MTRLOperations
+
+        ops = MTRLOperations.__new__(MTRLOperations)
+        ops.agent_core_arn = self.MOCK_AGENT_CORE_ARN
+        ops.rft_lambda = None
+        ops.model_package_group_arn = (
+            "arn:aws:sagemaker:us-east-1:123456789012:model-package-group/grp"
+        )
+        ops.execution_role = "arn:aws:iam::123456789012:role/role"
+        ops.subnets = None
+        ops.security_group_ids = None
+        ops.kms_key_id = None
+        ops.region = "us-east-1"
+        return ops
+
+    def _mock_sagemaker_modules(self):
+        import types
+
+        mock_sm_train = types.ModuleType("sagemaker.train")
+        mock_sm_train_mtrl = types.ModuleType("sagemaker.train.multi_turn_rl_trainer")
+        mock_sm_train_eval = types.ModuleType("sagemaker.train.evaluate")
+        mock_sm_core = types.ModuleType("sagemaker.core")
+        mock_sm_core_resources = types.ModuleType("sagemaker.core.resources")
+
+        self._mock_trainer_cls = MagicMock()
+        self._mock_trainer_instance = MagicMock()
+        self._mock_trainer_cls.return_value = self._mock_trainer_instance
+
+        self._mock_evaluator_cls = MagicMock()
+        self._mock_evaluator_instance = MagicMock()
+        self._mock_evaluator_cls.return_value = self._mock_evaluator_instance
+
+        self._mock_execution = MagicMock()
+        self._mock_execution.arn = "arn:aws:sagemaker:us-east-1:123456789012:pipeline/eval-exec"
+        self._mock_evaluator_instance.evaluate.return_value = self._mock_execution
+
+        mock_sm_train_mtrl.MultiTurnRLTrainer = self._mock_trainer_cls
+        mock_sm_train_eval.MultiTurnRLEvaluator = self._mock_evaluator_cls
+        mock_sm_core_resources.ModelPackage = MagicMock()
+
+        return {
+            "sagemaker.train": mock_sm_train,
+            "sagemaker.train.multi_turn_rl_trainer": mock_sm_train_mtrl,
+            "sagemaker.train.evaluate": mock_sm_train_eval,
+            "sagemaker.core": mock_sm_core,
+            "sagemaker.core.resources": mock_sm_core_resources,
+        }
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_eval_with_training_job_name(self, _mock_logger):
+        ops = self._create_mtrl_ops()
+        modules = self._mock_sagemaker_modules()
+
+        mock_attached_job = MagicMock()
+        self._mock_trainer_cls.attach.return_value = mock_attached_job
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                result = ops.execute_mtrl_eval(
+                    model=Model.NOVA_LITE_2,
+                    data_s3_path="s3://bucket/eval-data",
+                    output_s3_path="s3://bucket/output",
+                    model_path=self.MOCK_MODEL_PACKAGE_ARN,
+                    training_job_name="completed-training-job",
+                )
+
+        self.assertEqual(result, self._mock_execution)
+        # Should have built a trainer and attached the job
+        self._mock_trainer_cls.assert_called_once()
+        self._mock_trainer_cls.attach.assert_called_once_with("completed-training-job")
+        # Evaluator should receive the trainer as model
+        eval_call_kwargs = self._mock_evaluator_cls.call_args[1]
+        self.assertEqual(eval_call_kwargs["model"], self._mock_trainer_instance)
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_eval_fallback_without_training_job(self, _mock_logger):
+        ops = self._create_mtrl_ops()
+        modules = self._mock_sagemaker_modules()
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                result = ops.execute_mtrl_eval(
+                    model=Model.NOVA_LITE_2,
+                    data_s3_path="s3://bucket/eval-data",
+                    model_path=self.MOCK_MODEL_PACKAGE_ARN,
+                )
+
+        self.assertEqual(result, self._mock_execution)
+        # Should NOT attach a job — uses fallback path
+        self._mock_trainer_cls.attach.assert_not_called()
+        # Evaluator should receive model name (base hub content) since model_path is ARN
+        eval_call_kwargs = self._mock_evaluator_cls.call_args[1]
+        self.assertEqual(eval_call_kwargs["model"], Model.NOVA_LITE_2.hub_content_name)
+        # Should inject model_package_arn post-init
+        self.assertEqual(
+            self._mock_evaluator_instance._source_model_package_arn_cache,
+            self.MOCK_MODEL_PACKAGE_ARN,
+        )
+
+    @patch("amzn_nova_forge.manager.mtrl_manager.logger")
+    def test_execute_mtrl_eval_applies_overrides(self, _mock_logger):
+        ops = self._create_mtrl_ops()
+        modules = self._mock_sagemaker_modules()
+
+        with patch.dict("sys.modules", modules):
+            with patch.object(
+                ops,
+                "_get_or_create_checkpoint_model_package_group_arn",
+                return_value="arn:checkpoint",
+            ):
+                ops.execute_mtrl_eval(
+                    model=Model.NOVA_LITE_2,
+                    data_s3_path="s3://bucket/eval-data",
+                    overrides={"global_batch_size": 8},
+                )
+
+        # Verify evaluate was called (overrides applied without error)
+        self._mock_evaluator_instance.evaluate.assert_called_once()
 
 
 if __name__ == "__main__":

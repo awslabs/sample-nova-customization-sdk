@@ -2202,6 +2202,115 @@ class TestRecipeBuilder(unittest.TestCase):
 
             self.assertEqual(config["run"]["model_name_or_path"], s3_checkpoint)
 
+    @patch("amzn_nova_forge.util.recipe.get_hub_recipe_metadata")
+    @patch("amzn_nova_forge.util.recipe.download_templates_from_s3")
+    @patch("amzn_nova_forge.recipe.recipe_builder.Validator")
+    def test_model_name_or_path_model_package_arn_override_accepted(
+        self, mock_validator, mock_download, mock_metadata
+    ):
+        mock_metadata.return_value = {"recipe_uri": "s3://bucket/recipe"}
+
+        recipe_template = {
+            "run": {
+                "name": "{{name}}",
+                "model_name_or_path": "{{model_name_or_path}}",
+            }
+        }
+
+        overrides_template = {
+            "name": {"default": "", "type": "string"},
+            "model_name_or_path": {"default": "models/test", "type": "string"},
+        }
+
+        mock_download.return_value = (recipe_template, overrides_template, "image_uri")
+
+        builder = RecipeBuilder(
+            region=self.region,
+            job_name=self.job_name,
+            platform=self.platform,
+            model=self.mock_model,
+            method=self.method,
+            instance_type=self.instance_type,
+            instance_count=self.instance_count,
+            infra=self.mock_infra,
+            output_s3_path=self.output_s3,
+            data_s3_path=self.data_s3,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "recipe.yaml")
+
+            mp_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-mpg/1"
+            overrides = {"model_name_or_path": mp_arn}
+            recipe_path, *_ = builder.build_and_validate(
+                overrides=overrides,
+                output_recipe_path=output_path,
+            )
+
+            with open(recipe_path, "r") as f:
+                config = yaml.safe_load(f)
+
+            self.assertEqual(config["run"]["model_name_or_path"], mp_arn)
+
+    @patch("amzn_nova_forge.util.recipe.get_hub_recipe_metadata")
+    @patch("amzn_nova_forge.util.recipe.download_templates_from_s3")
+    @patch("amzn_nova_forge.recipe.recipe_builder.Validator")
+    @patch("amzn_nova_forge.recipe.recipe_builder.load_file_as_string")
+    def test_model_name_or_path_model_package_arn_from_input_recipe_accepted(
+        self, mock_load_file, mock_validator, mock_download, mock_metadata
+    ):
+        mock_metadata.return_value = {"recipe_uri": "s3://bucket/recipe"}
+
+        recipe_template = {
+            "run": {
+                "name": "{{name}}",
+                "model_name_or_path": "{{model_name_or_path}}",
+            }
+        }
+
+        overrides_template = {
+            "name": {"default": "", "type": "string"},
+            "model_name_or_path": {"default": "models/test", "type": "string"},
+        }
+
+        mock_download.return_value = (recipe_template, overrides_template, "image_uri")
+
+        mp_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-mpg/1"
+        input_recipe = {
+            "run": {
+                "name": "test",
+                "model_name_or_path": mp_arn,
+            }
+        }
+        mock_load_file.return_value = yaml.dump(input_recipe)
+
+        builder = RecipeBuilder(
+            region=self.region,
+            job_name=self.job_name,
+            platform=self.platform,
+            model=self.mock_model,
+            method=self.method,
+            instance_type=self.instance_type,
+            instance_count=self.instance_count,
+            infra=self.mock_infra,
+            output_s3_path=self.output_s3,
+            data_s3_path=self.data_s3,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "recipe.yaml")
+            input_recipe_path = os.path.join(tmpdir, "input_recipe.yaml")
+
+            recipe_path, *_ = builder.build_and_validate(
+                input_recipe_path=input_recipe_path,
+                output_recipe_path=output_path,
+            )
+
+            with open(recipe_path, "r") as f:
+                config = yaml.safe_load(f)
+
+            self.assertEqual(config["run"]["model_name_or_path"], mp_arn)
+
     @patch("amzn_nova_forge.recipe.recipe_builder.logger")
     @patch("amzn_nova_forge.util.checkpoint_util.validate_checkpoint_uri")
     @patch("amzn_nova_forge.util.recipe.get_hub_recipe_metadata")

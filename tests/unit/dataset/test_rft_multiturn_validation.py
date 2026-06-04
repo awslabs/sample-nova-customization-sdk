@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from amzn_nova_forge.core.enums import EvaluationTask, Model, TrainingMethod
+from amzn_nova_forge.core.enums import EvaluationTask, Model, Platform, TrainingMethod
 from amzn_nova_forge.dataset import (
     CSVDatasetLoader,
     JSONDatasetLoader,
@@ -52,7 +52,11 @@ class TestRFTMultiturnValidation:
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -88,7 +92,11 @@ class TestRFTMultiturnValidation:
                 id="id", prompt="prompt", answer="answer", task="task", info="info"
             )
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -126,7 +134,11 @@ class TestRFTMultiturnValidation:
         try:
             loader = JSONLDatasetLoader(id="id", metadata="metadata")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -169,7 +181,11 @@ class TestRFTMultiturnValidation:
                 id="id", prompt="prompt", answer="answer", task="task", info="info"
             )
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -190,7 +206,11 @@ class TestRFTMultiturnValidation:
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", info="info")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -211,7 +231,11 @@ class TestRFTMultiturnValidation:
         try:
             loader = JSONDatasetLoader(id="id", prompt="prompt", info="info")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -234,7 +258,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
                 id="id", prompt="prompt", answer="answer", task="task", info="info"
             )
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -262,7 +290,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
             with pytest.raises(Exception):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt", info="info")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.execute()
                 loader.execute()
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -284,7 +316,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
             with pytest.raises(Exception):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.execute()
                 loader.execute()
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -306,7 +342,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
             with pytest.raises(Exception):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.execute()
                 loader.execute()
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -333,7 +373,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
             with pytest.raises(Exception):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.execute()
                 loader.execute()
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -360,7 +404,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
             with pytest.raises(Exception):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.execute()
                 loader.execute()
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -387,7 +435,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
             with pytest.raises(Exception):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.execute()
                 loader.execute()
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
@@ -412,7 +464,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -440,7 +496,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -467,7 +527,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -496,7 +560,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -525,7 +593,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", answer="answer")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -550,7 +622,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", answer="answer")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -575,7 +651,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", task="task")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -605,7 +685,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", answer="answer", task="task")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -632,7 +716,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", answer="answer")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
 
@@ -660,7 +748,11 @@ sample-002,"Capital of France?","Paris","geography","{""difficulty"": ""easy""}"
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", answer="answer")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.execute()
             loader.execute()
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)

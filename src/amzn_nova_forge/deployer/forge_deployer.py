@@ -35,8 +35,11 @@ from amzn_nova_forge.core.types import (
     DeploymentResult,
     EndpointInfo,
     ForgeConfig,
+    InferenceComponentConfig,
+    validate_inference_component_resources,
     validate_region,
 )
+from amzn_nova_forge.core.validation_patterns import MODEL_PACKAGE_ARN_REGEX
 from amzn_nova_forge.iam.iam_role_creator import (
     create_bedrock_execution_role,
     create_sagemaker_execution_role,
@@ -57,10 +60,14 @@ from amzn_nova_forge.util.bedrock import (
 from amzn_nova_forge.util.logging import logger
 from amzn_nova_forge.util.sagemaker import (
     SAGEMAKER_EXECUTION_ROLE_NAME,
+    _get_sagemaker_inference_image,
     _validate_sagemaker_instance_type_for_model_deployment,
+    check_sagemaker_deployment_status,
+    create_inference_component,
     create_sagemaker_endpoint,
     create_sagemaker_model,
     find_sagemaker_model_by_tag,
+    monitor_inference_component,
 )
 from amzn_nova_forge.validation.endpoint_validator import (
     SAGEMAKER_ENDPOINT_ARN_REGEX,
@@ -116,12 +123,15 @@ class ForgeDeployer:
         sagemaker_instance_type: Optional[str] = "ml.p5.48xlarge",
         sagemaker_environment: Optional[SageMakerEndpointEnvironment] = None,
         skip_model_reuse: bool = False,
+        inference_component_configs: List[InferenceComponentConfig] = [],  # noqa: B006 - never mutated
     ) -> DeploymentResult:
         """Deploy a model to Bedrock or SageMaker.
 
         Args:
             model_artifact_path: S3 path to the trained model checkpoint,
-                or an existing Bedrock custom model ARN.
+                an existing Bedrock custom model ARN, or a SageMaker Model
+                Package name/ARN. Model package ARNs are auto-detected for
+                SageMaker deployments and passed via ModelPackageName.
             deploy_platform: Target platform.
             endpoint_name: Custom endpoint name (auto-generated if omitted).
             unit_count: Instance/PT unit count.
@@ -129,6 +139,9 @@ class ForgeDeployer:
             sagemaker_instance_type: EC2 instance type for SageMaker.
             sagemaker_environment: Optional SageMaker endpoint environment config.
             skip_model_reuse: If True, always create a new model (skip tag-based discovery).
+            inference_component_configs: List of configs for creating inference components.
+                When provided with SAGEMAKER platform, creates an IC-compatible endpoint
+                and deploys the inference component(s) in one step.
 
         Returns:
             DeploymentResult with endpoint information.
@@ -158,16 +171,22 @@ class ForgeDeployer:
                 sagemaker_instance_type, self.model, context_length, max_concurrency
             )
 
-            artifact_path = (
-                model_artifact_path
-                if model_artifact_path.endswith("/")
-                else model_artifact_path + "/"
-            )
-
-            if artifact_path.startswith("arn:aws:bedrock:"):
+            if model_artifact_path.startswith("arn:aws:bedrock:"):
                 raise ValueError(
                     "Cannot deploy Bedrock-customized models to SageMaker. "
                     "Train on SageMaker first."
+                )
+
+            # Auto-detect model package ARN
+            model_package_name: Optional[str] = None
+            if MODEL_PACKAGE_ARN_REGEX.match(model_artifact_path):
+                model_package_name = model_artifact_path
+                artifact_path = model_artifact_path
+            else:
+                artifact_path = (
+                    model_artifact_path
+                    if model_artifact_path.endswith("/")
+                    else model_artifact_path + "/"
                 )
 
             return self._deploy_to_sagemaker(
@@ -177,6 +196,9 @@ class ForgeDeployer:
                 unit_count=unit_count,
                 sagemaker_environment=sagemaker_environment,
                 execution_role_name=execution_role_name,
+                skip_model_reuse=skip_model_reuse,
+                inference_component_configs=inference_component_configs,
+                model_package_name=model_package_name,
             )
         else:
             raise ValueError(f"Unsupported deployment platform: {deploy_platform}")
@@ -202,7 +224,10 @@ class ForgeDeployer:
     )
     def get_status_by_arn(self, endpoint_arn: str, platform: DeployPlatform) -> Optional[JobStatus]:
         """Check deployment status by ARN."""
-        status_str = check_deployment_status(endpoint_arn, platform, region=self.region)
+        if platform == DeployPlatform.SAGEMAKER:
+            status_str = check_sagemaker_deployment_status(endpoint_arn, region=self.region)
+        else:
+            status_str = check_deployment_status(endpoint_arn, platform, region=self.region)
         if status_str is None:
             return None
         try:
@@ -244,8 +269,94 @@ class ForgeDeployer:
             else:
                 platform = DeployPlatform.BEDROCK_OD
 
-        status = check_deployment_status(arn, platform, region=self.region)
+        if platform == DeployPlatform.SAGEMAKER:
+            status = check_sagemaker_deployment_status(arn, region=self.region)
+        else:
+            status = check_deployment_status(arn, platform, region=self.region)
         logger.info(f"Deployment status for {arn}: {status}")
+
+    @_telemetry_emitter(
+        Feature.DEPLOY,
+        "create_inference_component",
+        extra_info_fn=lambda self, *args, **kwargs: {
+            "model": self.model.value,
+        },
+    )
+    def create_inference_component(
+        self,
+        inference_component_name: str,
+        model_name: str,
+        num_cpus: int,
+        num_accelerators: int,
+        min_memory_in_mb: int,
+        endpoint_name: str,
+        variant_name: str = "primary",
+        copy_count: int = 1,
+    ) -> DeploymentResult:
+        """Create an inference component on an existing SageMaker endpoint.
+
+        Validates the target endpoint is InService, then calls CreateInferenceComponent
+        using the specified SageMaker model and returns a DeploymentResult immediately
+        without waiting for the component to become active.
+
+        Args:
+            inference_component_name: Unique name for the inference component.
+            model_name: Name of the existing SageMaker model to use.
+            num_cpus: Number of vCPUs to allocate.
+            num_accelerators: Number of accelerators (GPUs) to allocate.
+            min_memory_in_mb: Minimum memory in MB to allocate.
+            endpoint_name: Name of the existing SageMaker endpoint (must be InService).
+            variant_name: Production variant name on the endpoint. Default: "primary".
+            copy_count: Number of model copies to deploy. Default: 1.
+
+        Returns:
+            DeploymentResult with endpoint info containing the inference component ARN.
+
+        Raises:
+            Exception: If the endpoint does not exist, is not InService,
+                       or the CreateInferenceComponent API call fails.
+        """
+        sagemaker_client = boto3.client("sagemaker", region_name=self.region)
+
+        return create_inference_component(
+            inference_component_name=inference_component_name,
+            endpoint_name=endpoint_name,
+            variant_name=variant_name,
+            model_name=model_name,
+            num_cpus=num_cpus,
+            num_accelerators=num_accelerators,
+            min_memory_in_mb=min_memory_in_mb,
+            copy_count=copy_count,
+            sagemaker_client=sagemaker_client,
+            region=self.region,
+        )
+
+    @_telemetry_emitter(
+        Feature.DEPLOY,
+        "monitor_inference_component",
+        extra_info_fn=lambda self, *args, **kwargs: {
+            "model": self.model.value,
+        },
+    )
+    def monitor_inference_component(self, inference_component_name: str) -> str:
+        """Monitor an inference component until it reaches a terminal state.
+
+        Polls DescribeInferenceComponent every 30 seconds until InService or Failed.
+
+        Args:
+            inference_component_name: Name of the inference component to monitor.
+
+        Returns:
+            str: Final status ("InService").
+
+        Raises:
+            Exception: If the component reaches Failed status or the API call errors.
+        """
+        sagemaker_client = boto3.client("sagemaker", region_name=self.region)
+        return monitor_inference_component(
+            inference_component_name=inference_component_name,
+            sagemaker_client=sagemaker_client,
+        )
 
     @_telemetry_emitter(
         Feature.DEPLOY,
@@ -298,34 +409,76 @@ class ForgeDeployer:
 
     def create_custom_model(
         self,
-        model_artifact_path: str,
+        model_artifact_path: Optional[str] = None,
         endpoint_name: Optional[str] = None,
         execution_role_name: Optional[str] = None,
         tags: Optional[List[Dict[str, str]]] = None,
         skip_model_reuse: bool = False,
+        custom_model_data_source: Optional[Dict[str, Any]] = None,
     ) -> ModelDeployResult:
-        """Create a Bedrock custom model from S3 artifacts.
+        """Create a Bedrock custom model from S3 artifacts or a model package ARN.
 
-        Extracts the model-creation step from the deploy flow so users can
-        create a model independently of endpoint deployment.
+        Either ``model_artifact_path`` (maps to ``modelSourceConfig``) or
+        ``custom_model_data_source`` (maps to ``customModelDataSource``) must be
+        provided, but not both.
 
         Args:
-            model_artifact_path: S3 path to trained model checkpoint.
+            model_artifact_path: S3 path to trained model checkpoint. Used to
+                populate ``modelSourceConfig.s3DataSource.s3Uri``.
             endpoint_name: Optional name prefix for the model name.
             execution_role_name: Optional IAM role name. If None, the SDK creates
                 and manages the default role.
             tags: Optional list of {"key": str, "value": str} dicts for source tracking.
             skip_model_reuse: If True, always create a new model (skip tag-based discovery).
+            custom_model_data_source: Alternative data source configuration for the
+                custom model. For example::
+
+                    {"modelPackageArnDataSource": {"modelPackageArn": "MODEL_PACKAGE_ARN"}}
+
+                When provided, ``modelSourceConfig`` is omitted from the API call.
 
         Returns:
             ModelDeployResult with model_arn, model_name, escrow_uri, etc.
+
+        Raises:
+            ValueError: If neither or both of ``model_artifact_path`` and
+                ``custom_model_data_source`` are provided.
         """
+        if model_artifact_path and custom_model_data_source:
+            raise ValueError(
+                "Only one of 'model_artifact_path' (modelSourceConfig) or "
+                "'custom_model_data_source' (customModelDataSource) may be provided, not both."
+            )
+        if not model_artifact_path and not custom_model_data_source:
+            raise ValueError(
+                "Either 'model_artifact_path' (modelSourceConfig) or "
+                "'custom_model_data_source' (customModelDataSource) must be provided."
+            )
+        # Determine the escrow path for model reuse tracking.
+        # For custom_model_data_source dicts, extract the ARN string to avoid
+        # dict repr characters ({, }, ') that violate Bedrock tag constraints.
+        if model_artifact_path:
+            escrow_path = model_artifact_path
+        else:
+            assert custom_model_data_source is not None
+            mp_ds = custom_model_data_source.get("modelPackageArnDataSource", {})
+            escrow_path = mp_ds.get("modelPackageArn")
+            if not escrow_path:
+                logger.warning(
+                    "Could not extract a tag-safe identifier from 'custom_model_data_source'. "
+                    "Model reuse tracking via escrow tag will be skipped."
+                )
+
         # Check for existing model by escrow tag
-        existing = self.find_published_model("bedrock", model_artifact_path, skip_model_reuse)
+        existing = (
+            self.find_published_model("bedrock", escrow_path, skip_model_reuse)
+            if escrow_path
+            else None
+        )
         if existing:
             logger.info(
                 f"Found existing Bedrock model {existing} for escrow URI "
-                f"'{model_artifact_path}'. Reusing instead of creating a duplicate."
+                f"'{escrow_path}'. Reusing instead of creating a duplicate."
             )
             bedrock_client = boto3.client("bedrock", region_name=self.region)
             result = ModelDeployResult.from_arn(existing, bedrock_client)
@@ -344,7 +497,10 @@ class ForgeDeployer:
             else:
                 logger.warning("Model %s has unknown status. Creating new model.", existing)
 
-        bedrock_client = boto3.client("bedrock", region_name=self.region)
+        bedrock_client = boto3.client(
+            "bedrock",
+            region_name=self.region,
+        )
         iam_client = boto3.client("iam", region_name=self.region)
 
         # Resolve execution role
@@ -375,9 +531,13 @@ class ForgeDeployer:
 
         create_kwargs: Dict[str, Any] = {
             "modelName": model_name,
-            "modelSourceConfig": {"s3DataSource": {"s3Uri": model_artifact_path}},
             "roleArn": bedrock_execution_role_arn,
         }
+
+        if model_artifact_path:
+            create_kwargs["modelSourceConfig"] = {"s3DataSource": {"s3Uri": model_artifact_path}}
+        else:
+            create_kwargs["customModelDataSource"] = custom_model_data_source
 
         if self._config.kms_key_id:
             if self._config.kms_key_id.startswith("arn:aws:kms:"):
@@ -392,12 +552,13 @@ class ForgeDeployer:
             create_kwargs["modelTags"] = tags
 
         # Inject escrow URI tag (Bedrock format: lowercase key/value)
-        escrow_tag = {
-            "key": ESCROW_URI_TAG_KEY,
-            "value": _escrow_tag_value(model_artifact_path),
-        }
-        all_tags = list(create_kwargs.get("modelTags", [])) + [escrow_tag]
-        create_kwargs["modelTags"] = all_tags
+        if escrow_path:
+            escrow_tag = {
+                "key": ESCROW_URI_TAG_KEY,
+                "value": _escrow_tag_value(escrow_path),
+            }
+            all_tags = list(create_kwargs.get("modelTags", [])) + [escrow_tag]
+            create_kwargs["modelTags"] = all_tags
 
         try:
             logger.info(f"Creating custom model '{model_name}'...")
@@ -416,12 +577,13 @@ class ForgeDeployer:
         result = ModelDeployResult(
             model_arn=model["modelArn"],
             model_name=model_name,
-            escrow_uri=model_artifact_path,
+            escrow_uri=escrow_path or "",
             created_at=datetime.now(timezone.utc),
         )
 
         self.last_model_publish = result
-        self._published_models.add(("bedrock", model["modelArn"], model_artifact_path))
+        if escrow_path:
+            self._published_models.add(("bedrock", model["modelArn"], escrow_path))
         logger.info(f"Custom model created: {model['modelArn']}")
 
         return result
@@ -690,6 +852,8 @@ class ForgeDeployer:
         sagemaker_environment: Optional[SageMakerEndpointEnvironment] = None,
         execution_role_name: Optional[str] = None,
         skip_model_reuse: bool = False,
+        inference_component_configs: List[InferenceComponentConfig] = [],  # noqa: B006 - never mutated
+        model_package_name: Optional[str] = None,
     ) -> DeploymentResult:
         env = sagemaker_environment or SageMakerEndpointEnvironment()
         env.validate_smi_config_bounds(model=self.model, instance_type=instance_type)
@@ -743,12 +907,13 @@ class ForgeDeployer:
             model_arn = create_sagemaker_model(
                 region=self.region,
                 model_name=model_name,
-                model_s3_location=model_artifact_path,
+                model_s3_location=model_artifact_path if not model_package_name else None,
                 sagemaker_execution_role_arn=sagemaker_role_arn,
                 sagemaker_client=sagemaker_client,
                 environment=env_vars,
                 deployment_mode=self.deployment_mode,
                 tags=[escrow_tag],
+                model_package_name=model_package_name,
             )
             self._published_models.add(("sagemaker", model_arn, model_artifact_path))
 
@@ -760,16 +925,36 @@ class ForgeDeployer:
         )
         self.last_model_publish = model_deploy
 
+        # Resolve inference component config defaults from deploy context
+        if inference_component_configs:
+            if len(inference_component_configs) > 1:
+                logger.warning(
+                    f"Deploying {len(inference_component_configs)} inference components to endpoint "
+                    f"'{endpoint_name}'. Total resource validation is not performed — ensure the "
+                    f"combined resource requirements do not exceed the instance capacity."
+                )
+            for ic_config in inference_component_configs:
+                validate_inference_component_resources(ic_config, self.model)
+
         try:
-            endpoint_arn = create_sagemaker_endpoint(
-                model_name=model_name,
-                endpoint_config_name=endpoint_config_name,
-                endpoint_name=endpoint_name,
-                instance_type=instance_type,
-                sagemaker_client=sagemaker_client,
-                initial_instance_count=unit_count,
-                deployment_mode=self.deployment_mode,
-            )
+            endpoint_kwargs: Dict[str, Any] = {
+                "model_name": model_name,
+                "endpoint_config_name": endpoint_config_name,
+                "endpoint_name": endpoint_name,
+                "instance_type": instance_type,
+                "sagemaker_client": sagemaker_client,
+                "initial_instance_count": unit_count,
+                "deployment_mode": self.deployment_mode,
+                **(
+                    {
+                        "inference_component_configs": inference_component_configs,
+                        "execution_role_arn": sagemaker_role_arn,
+                    }
+                    if inference_component_configs
+                    else {}
+                ),
+            }
+            endpoint_arn = create_sagemaker_endpoint(**endpoint_kwargs)
         except Exception as e:
             raise RuntimeError(
                 f"SageMaker endpoint creation failed: {e}\n\n"

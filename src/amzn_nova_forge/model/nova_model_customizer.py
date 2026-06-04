@@ -1027,8 +1027,9 @@ class NovaModelCustomizer:
         execution_role_name: Optional[str] = None,
         tags: Optional[List[Dict[str, str]]] = None,
         skip_model_reuse: bool = False,
+        custom_model_data_source: Optional[Dict[str, Any]] = None,
     ) -> ModelDeployResult:
-        """Create a Bedrock custom model from S3 artifacts.
+        """Create a Bedrock custom model from S3 artifacts or a model package ARN.
 
         Delegates to ForgeDeployer.create_custom_model(). Handles job_result
         resolution at the facade level before delegating.
@@ -1039,8 +1040,14 @@ class NovaModelCustomizer:
             DeprecationWarning,
             stacklevel=2,
         )
-        # Resolve model_artifact_path from job_result (facade-level concern)
-        if model_artifact_path is None and job_result is not None:
+        # Resolve model_artifact_path from job_result (facade-level concern).
+        # Skip extraction when custom_model_data_source is already provided,
+        # since it serves as a valid alternative to model_artifact_path.
+        if (
+            model_artifact_path is None
+            and job_result is not None
+            and custom_model_data_source is None
+        ):
             model_artifact_path = extract_checkpoint_path_from_job_output(
                 output_s3_path=job_result.model_artifacts.output_s3_path,
                 job_result=job_result,
@@ -1048,11 +1055,13 @@ class NovaModelCustomizer:
             if model_artifact_path is None:
                 raise ValueError(
                     f"Could not resolve checkpoint path from job result '{job_result.job_id}'. "
-                    f"Provide model_artifact_path explicitly."
+                    f"Provide model_artifact_path or custom_model_data_source explicitly."
                 )
 
-        if model_artifact_path is None:
-            raise ValueError("Either model_artifact_path or job_result must be provided.")
+        if model_artifact_path is None and custom_model_data_source is None:
+            raise ValueError(
+                "Either model_artifact_path, job_result, or custom_model_data_source must be provided."
+            )
 
         deployer = self._build_deployer()
         result = deployer.create_custom_model(
@@ -1061,6 +1070,7 @@ class NovaModelCustomizer:
             execution_role_name=execution_role_name,
             tags=tags,
             skip_model_reuse=skip_model_reuse,
+            custom_model_data_source=custom_model_data_source,
         )
 
         # Sync state back

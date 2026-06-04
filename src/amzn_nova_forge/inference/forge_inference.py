@@ -101,12 +101,15 @@ class ForgeInference:
         self,
         endpoint_arn: str,
         request_body: Dict[str, Any],
+        inference_component_name: Optional[str] = None,
     ) -> Any:
         """Invoke real-time inference against an endpoint.
 
         Args:
             endpoint_arn: ARN of the deployed endpoint.
             request_body: Inference request body.
+            inference_component_name: Optional inference component to target on a
+                SageMaker endpoint. Required for IC-enabled endpoints.
 
         Returns:
             Inference result.
@@ -117,7 +120,12 @@ class ForgeInference:
             runtime_client = boto3.client("sagemaker-runtime", region_name=self.region)
             endpoint_name = endpoint_arn.split("/")[-1]
             logger.info(f"Invoking SageMaker endpoint: {endpoint_name}")
-            return invoke_sagemaker_inference(request_body, endpoint_name, runtime_client)
+            return invoke_sagemaker_inference(
+                request_body,
+                endpoint_name,
+                runtime_client,
+                inference_component_name=inference_component_name,
+            )
         else:
             runtime_client = boto3.client("bedrock-runtime", region_name=self.region)
             return invoke_model(

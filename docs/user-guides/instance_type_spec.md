@@ -118,4 +118,4 @@ _All allow 1, 2, 4, 8, or 16 instances_
 | Lite     | ml.g6.12xlarge, ml.g6.24xlarge, ml.g6.48xlarge, ml.p5.48xlarge                                                                                |
 | Lite 2.0 | ml.g6.48xlarge, ml.p5.48xlarge                                                                                                                |
 
-SageMaker Inference configuration for max_context_length and max_concurrency for each model/instance combination can be found in the [SageMaker Inference AWS documentation](https://docs.aws.amazon.com/nova/latest/userguide/nova-model-sagemaker-inference.html).
+SageMaker Inference configuration for max_context_length and max_concurrency for each model/instance combination, as well as inference component support, can be found in the [SageMaker Inference AWS documentation](https://docs.aws.amazon.com/nova/latest/userguide/nova-model-sagemaker-inference.html).

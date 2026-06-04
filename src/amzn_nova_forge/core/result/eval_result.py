@@ -31,6 +31,7 @@ from amzn_nova_forge.core.result.job_result import (
     BedrockStatusManager,
     JobStatus,
     JobStatusManager,
+    MTRLStatusManager,
     SMHPStatusManager,
     SMTJStatusManager,
 )
@@ -199,6 +200,8 @@ class EvaluationResult(BaseJobResult, ABC):
 
 @dataclass
 class SMTJEvaluationResult(EvaluationResult):
+    _job_name: Optional[str] = None
+
     def __init__(
         self,
         job_id: str,
@@ -209,30 +212,43 @@ class SMTJEvaluationResult(EvaluationResult):
         s3_client=None,
         region: Optional[str] = None,
     ):
+        self._region = region
+        self._job_name: Optional[str] = None
         self._sagemaker_client = sagemaker_client or boto3.client("sagemaker", region_name=region)
         super().__init__(
             job_id, started_time, eval_task, eval_output_path, s3_client, region=region
         )
 
     def _create_status_manager(self) -> JobStatusManager:
+        if self.eval_task == EvaluationTask.RFT_MULTITURN_EVAL:
+            return MTRLStatusManager(region=self._region)
         return SMTJStatusManager(self._sagemaker_client)
 
     def _to_dict(self):
-        return {
+        d = {
             "job_id": self.job_id,
             "started_time": self.started_time.isoformat(),
             "eval_task": self.eval_task.value,
             "eval_output_path": self.eval_output_path,
         }
+        if self._region:
+            d["region"] = self._region
+        if getattr(self, "_job_name", None):
+            d["job_name"] = self._job_name
+        return d
 
     @classmethod
     def _from_dict(cls, data) -> "SMTJEvaluationResult":
-        return cls(
+        result = cls(
             job_id=data["job_id"],
             started_time=datetime.fromisoformat(data["started_time"]),
             eval_task=EvaluationTask(data["eval_task"]),
             eval_output_path=data["eval_output_path"],
+            region=data.get("region"),
         )
+        if data.get("job_name"):
+            result._job_name = data["job_name"]
+        return result
 
 
 @dataclass

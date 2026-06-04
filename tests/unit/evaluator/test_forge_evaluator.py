@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, PropertyMock, create_autospec, patch
@@ -19,14 +21,18 @@ from amzn_nova_forge.core.enums import EvaluationTask, Model, Platform, Training
 from amzn_nova_forge.core.result import (
     SMHPEvaluationResult,
     SMTJEvaluationResult,
+    SMTJTrainingResult,
 )
 from amzn_nova_forge.core.result.training_result import TrainingResult
 from amzn_nova_forge.core.types import ForgeConfig, ModelArtifacts
 from amzn_nova_forge.evaluator.forge_evaluator import EvalTaskConfig, ForgeEvaluator
+from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
 from amzn_nova_forge.manager.runtime_manager import (
     SMHPRuntimeManager,
     SMTJRuntimeManager,
+    SMTJServerlessRuntimeManager,
 )
+from amzn_nova_forge.monitor import MLflowMonitor
 
 
 class TestForgeEvaluatorInit(unittest.TestCase):
@@ -767,8 +773,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
     """Tests for ForgeEvaluator InspectLens path."""
 
     def _make_evaluator(self, image_uri=None):
-        from unittest.mock import PropertyMock
-
         mock_infra = create_autospec(SMTJRuntimeManager)
         mock_infra.kms_key_id = None
         mock_infra.instance_type = "ml.m5.large"
@@ -800,8 +804,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
         return evaluator
 
     def test_dry_run_returns_none(self):
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/boolq/",
@@ -832,8 +834,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
         self.assertIn("inspect_lens_config is required", str(ctx.exception))
 
     def test_overrides_warning_for_non_decoding_keys(self):
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/boolq/",
@@ -857,8 +857,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
         self.assertTrue(any("benchmarks_path" in w for w in warning_calls))
 
     def test_valid_decoding_overrides_no_warning(self):
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/boolq/",
@@ -882,8 +880,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
         self.assertFalse(any("overrides" in w for w in warning_calls))
 
     def test_inference_provider_bedrock_default(self):
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/",
@@ -894,8 +890,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
         self.assertIn("us.amazon.nova-micro-v1:0", provider["bedrock"]["model_id"])
 
     def test_inference_provider_existing_endpoint(self):
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/",
@@ -906,8 +900,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
         self.assertEqual(provider["sagemaker_endpoint"]["endpoint_name"], "my-endpoint")
 
     def test_inference_provider_model_path_overrides_bedrock(self):
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/",
@@ -921,8 +913,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
 
     def test_cache_hit_returns_cached_result(self):
         """When job caching is enabled and a matching result exists, return it without submitting."""
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
         config = InspectLensConfig(
             benchmarks_path="s3://bucket/benchmarks/boolq/",
@@ -957,11 +947,6 @@ class TestForgeEvaluatorInspectLens(unittest.TestCase):
 
     def test_mlflow_tracking_injected_into_config_dict(self):
         """When ForgeConfig.mlflow_monitor is set, tracking section must appear in the YAML dict."""
-        from unittest.mock import PropertyMock
-
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-        from amzn_nova_forge.monitor import MLflowMonitor
-
         mock_infra = create_autospec(SMTJRuntimeManager)
         mock_infra.kms_key_id = None
         mock_infra.instance_type = "ml.m5.large"
@@ -1041,8 +1026,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
     FIXED_RUN_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
     def _make_evaluator(self, output_s3_path="s3://bucket/output/"):
-        from unittest.mock import PropertyMock
-
         mock_infra = create_autospec(SMTJRuntimeManager)
         mock_infra.kms_key_id = None
         mock_infra.instance_type = "ml.m5.large"
@@ -1092,11 +1075,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
 
     def test_local_benchmarks_path_raises_valueerror(self):
         """Local benchmarks_path should raise ValueError — user must upload first."""
-        import os
-        import tempfile
-
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator(output_s3_path="s3://bucket/output/")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1127,9 +1105,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
 
     def test_upload_benchmarks(self):
         """upload_benchmarks() uploads .py files to S3 and returns the S3 URI."""
-        import os
-        import tempfile
-
         evaluator = self._make_evaluator(output_s3_path="s3://bucket/output/")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1160,8 +1135,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
 
     def test_upload_benchmarks_invalid_s3_path_raises(self):
         """upload_benchmarks() raises ValueError for non-S3 path."""
-        import tempfile
-
         evaluator = self._make_evaluator()
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaises(ValueError) as ctx:
@@ -1170,8 +1143,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
 
     def test_s3_benchmarks_config_colocated_with_benchmarks(self):
         """S3 benchmarks_path in a different bucket → config and output still under output_s3_path."""
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator(output_s3_path="s3://bucket/output/")
 
         cfg = InspectLensConfig(
@@ -1210,8 +1181,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
 
     def test_run_id_in_job_name(self):
         """unique_job_name should contain the run_id UUID."""
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator()
 
         cfg = InspectLensConfig(
@@ -1241,8 +1210,6 @@ class TestInspectLensS3Paths(unittest.TestCase):
 
     def test_s3_benchmarks_bucket_only_path(self):
         """S3 benchmarks_path in a separate bucket → output still goes under output_s3_path."""
-        from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-
         evaluator = self._make_evaluator(output_s3_path="s3://bucket/output/")
 
         cfg = InspectLensConfig(
@@ -1272,6 +1239,232 @@ class TestInspectLensS3Paths(unittest.TestCase):
         output_path = create_call[1]["OutputDataConfig"]["S3OutputPath"]
         # Output always goes under output_s3_path, not the benchmarks bucket
         self.assertEqual(output_path, f"s3://bucket/output/{self.FIXED_RUN_ID}/output/")
+
+
+class TestForgeEvaluatorMTRL(unittest.TestCase):
+    """Tests for ForgeEvaluator._execute_mtrl_eval via evaluate()."""
+
+    def setUp(self):
+        self.model = Model.NOVA_LITE_2
+        self.mock_infra = create_autospec(SMTJServerlessRuntimeManager)
+        self.mock_infra.kms_key_id = None
+        self.mock_infra.instance_type = None
+        self.mock_infra.instance_count = None
+        self.mock_infra.platform = Platform.SMTJServerless
+        self.mock_infra.rft_lambda_arn = None
+        self.mock_infra.hub_content_version = None
+
+        # Mock execute_mtrl_eval return value
+        mock_execution = MagicMock()
+        mock_execution.arn = (
+            "arn:aws:sagemaker:us-east-1:123456789012:pipeline-execution/mtrl-eval-exec"
+        )
+        self.mock_infra.execute_mtrl_eval.return_value = mock_execution
+
+        self._patcher_set_output = patch(
+            "amzn_nova_forge.evaluator.forge_evaluator.set_output_s3_path",
+            return_value="s3://bucket/output",
+        )
+        self._patcher_session = patch("boto3.session.Session")
+        self._patcher_client = patch("boto3.client")
+
+        self._patcher_set_output.start()
+        mock_session = self._patcher_session.start()
+        self._patcher_client.start()
+
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+
+        mock_mlflow = MagicMock(spec=MLflowMonitor)
+        mock_mlflow.tracking_uri = (
+            "arn:aws:sagemaker:us-east-1:123456789012:mlflow-tracking-server/my-server"
+        )
+
+        self.evaluator = ForgeEvaluator(
+            model=self.model,
+            infra=self.mock_infra,
+            data_s3_path="s3://bucket/data",
+            config=ForgeConfig(mlflow_monitor=mock_mlflow),
+        )
+
+    def tearDown(self):
+        self._patcher_client.stop()
+        self._patcher_session.stop()
+        self._patcher_set_output.stop()
+
+    def test_mtrl_eval_resolves_model_path_from_job_result(self):
+        """_execute_mtrl_eval resolves model_path from MTRL job_result's output_model_arn."""
+        mock_job_result = MagicMock(spec=SMTJTrainingResult)
+        mock_job_result._is_mtrl = True
+        mock_job_result.job_id = "mtrl-train-123"
+        mock_job_result.model_artifacts = ModelArtifacts(
+            output_s3_path="s3://bucket/output/",
+            output_model_arn="arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1",
+        )
+
+        result = self.evaluator.evaluate(
+            job_name="test-mtrl-eval",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            job_result=mock_job_result,
+        )
+
+        self.mock_infra.execute_mtrl_eval.assert_called_once()
+        call_kwargs = self.mock_infra.execute_mtrl_eval.call_args[1]
+        self.assertEqual(
+            call_kwargs["model_path"],
+            "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1",
+        )
+        self.assertEqual(call_kwargs["training_job_name"], "mtrl-train-123")
+        self.assertIsInstance(result, SMTJEvaluationResult)
+
+    def test_mtrl_eval_uses_explicit_model_path(self):
+        """_execute_mtrl_eval uses explicit model_path when provided directly."""
+        explicit_arn = "arn:aws:sagemaker:us-east-1:123456789012:model-package/explicit-group/2"
+
+        result = self.evaluator.evaluate(
+            job_name="test-mtrl-eval-explicit",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            model_path=explicit_arn,
+        )
+
+        self.mock_infra.execute_mtrl_eval.assert_called_once()
+        call_kwargs = self.mock_infra.execute_mtrl_eval.call_args[1]
+        self.assertEqual(call_kwargs["model_path"], explicit_arn)
+        self.assertIsNone(call_kwargs["training_job_name"])
+        self.assertIsInstance(result, SMTJEvaluationResult)
+
+    def test_mtrl_eval_dry_run_returns_none(self):
+        """_execute_mtrl_eval with dry_run=True returns None without calling infra."""
+        result = self.evaluator.evaluate(
+            job_name="test-mtrl-eval-dryrun",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            dry_run=True,
+        )
+
+        self.assertIsNone(result)
+        self.mock_infra.execute_mtrl_eval.assert_not_called()
+
+    def test_mtrl_eval_evaluate_base_model_passed_to_infra(self):
+        """evaluate_base_model from EvalTaskConfig is passed to execute_mtrl_eval."""
+        model_path = "arn:aws:sagemaker:us-east-1:123456789012:model-package/rmp/1"
+
+        result = self.evaluator.evaluate(
+            job_name="test-mtrl-eval-both",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            model_path=model_path,
+            task_config=EvalTaskConfig(evaluate_base_model=True),
+        )
+
+        self.mock_infra.execute_mtrl_eval.assert_called_once()
+        call_kwargs = self.mock_infra.execute_mtrl_eval.call_args[1]
+        self.assertEqual(call_kwargs["model_path"], model_path)
+        self.assertTrue(call_kwargs["evaluate_base_model"])
+        self.assertIsInstance(result, SMTJEvaluationResult)
+
+    def test_mtrl_eval_evaluate_base_model_defaults_to_false(self):
+        """evaluate_base_model defaults to False when not in task_config."""
+        model_path = "arn:aws:sagemaker:us-east-1:123456789012:model-package/rmp/1"
+
+        result = self.evaluator.evaluate(
+            job_name="test-mtrl-eval-ft-only",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            model_path=model_path,
+        )
+
+        self.mock_infra.execute_mtrl_eval.assert_called_once()
+        call_kwargs = self.mock_infra.execute_mtrl_eval.call_args[1]
+        self.assertFalse(call_kwargs["evaluate_base_model"])
+
+    def test_evaluate_base_model_only_used_for_mtrl(self):
+        """evaluate_base_model in EvalTaskConfig is only extracted for RFT_MULTITURN_EVAL."""
+        # When using MTRL without evaluate_base_model, it should default to False
+        self.evaluator.evaluate(
+            job_name="test-mtrl-no-base",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+        )
+
+        call_kwargs = self.mock_infra.execute_mtrl_eval.call_args[1]
+        self.assertFalse(call_kwargs["evaluate_base_model"])
+
+        # When using MTRL WITH evaluate_base_model=True, it should be True
+        self.mock_infra.execute_mtrl_eval.reset_mock()
+        self.evaluator.evaluate(
+            job_name="test-mtrl-with-base",
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            model_path="arn:aws:sagemaker:us-east-1:123:model-package/rmp/1",
+            task_config=EvalTaskConfig(evaluate_base_model=True),
+        )
+
+        call_kwargs = self.mock_infra.execute_mtrl_eval.call_args[1]
+        self.assertTrue(call_kwargs["evaluate_base_model"])
+
+    @patch(
+        "amzn_nova_forge.evaluator.forge_evaluator.set_output_s3_path",
+        return_value="s3://bucket/output",
+    )
+    @patch("boto3.client")
+    @patch("boto3.session.Session")
+    def test_mtrl_eval_raises_without_mlflow_config(self, mock_session, _mock_client, _mock_output):
+        """AgentRFT eval jobs must have an MLflow config; raise ValueError if missing."""
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        mock_infra = create_autospec(SMTJServerlessRuntimeManager)
+        mock_infra.kms_key_id = None
+        mock_infra.instance_type = None
+        mock_infra.instance_count = None
+        mock_infra.platform = Platform.SMTJServerless
+        mock_infra.rft_lambda_arn = None
+        mock_infra.hub_content_version = None
+
+        evaluator = ForgeEvaluator(
+            model=Model.NOVA_LITE_2,
+            infra=mock_infra,
+            data_s3_path="s3://bucket/data",
+            config=ForgeConfig(),  # No mlflow_monitor
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            evaluator.evaluate(
+                job_name="test-mtrl-eval-no-mlflow",
+                eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+                model_path="arn:aws:sagemaker:us-east-1:123:model-package/rmp/1",
+            )
+        self.assertIn("MLflow configuration is required", str(ctx.exception))
+
+    @patch(
+        "amzn_nova_forge.evaluator.forge_evaluator.set_output_s3_path",
+        return_value="s3://bucket/output",
+    )
+    @patch("boto3.client")
+    @patch("boto3.session.Session")
+    def test_mtrl_eval_raises_without_mlflow_tracking_uri(
+        self, mock_session, _mock_client, _mock_output
+    ):
+        """AgentRFT eval jobs must have a tracking_uri; raise ValueError if None."""
+        type(mock_session.return_value).region_name = PropertyMock(return_value="us-east-1")
+        mock_infra = create_autospec(SMTJServerlessRuntimeManager)
+        mock_infra.kms_key_id = None
+        mock_infra.instance_type = None
+        mock_infra.instance_count = None
+        mock_infra.platform = Platform.SMTJServerless
+        mock_infra.rft_lambda_arn = None
+        mock_infra.hub_content_version = None
+
+        mock_monitor = MagicMock(spec=MLflowMonitor)
+        mock_monitor.tracking_uri = None
+
+        evaluator = ForgeEvaluator(
+            model=Model.NOVA_LITE_2,
+            infra=mock_infra,
+            data_s3_path="s3://bucket/data",
+            config=ForgeConfig(mlflow_monitor=mock_monitor),
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            evaluator.evaluate(
+                job_name="test-mtrl-eval-no-tracking-uri",
+                eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+                model_path="arn:aws:sagemaker:us-east-1:123:model-package/rmp/1",
+            )
+        self.assertIn("MLflow configuration is required", str(ctx.exception))
 
 
 if __name__ == "__main__":

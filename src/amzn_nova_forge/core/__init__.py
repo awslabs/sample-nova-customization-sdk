@@ -60,6 +60,7 @@ from amzn_nova_forge.core.types import (
     ModelArtifacts,
     ModelConfigDict,
     RecipeConfig,
+    ValidationConfig,
     validate_region,
 )
 

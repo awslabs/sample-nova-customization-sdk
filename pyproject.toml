@@ -17,12 +17,13 @@ authors = [
 license = "Apache-2.0"
 readme = "README.md"
 dependencies = [
-    "boto3",
+    "boto3>=1.43.20",
     "filetype",
     "matplotlib",
     "pydantic>=2.0",
     "pyarrow>=14.0.1",
-    "sagemaker>=3.5.0",
+    "sagemaker>=3.13.0",
+    "tqdm",
 ]
 [project.optional-dependencies]
 video = ["pymediainfo"]

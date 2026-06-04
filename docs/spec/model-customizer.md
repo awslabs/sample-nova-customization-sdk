@@ -212,6 +212,7 @@ def train(
   - `loraplus_lr_ratio` (float): LoRA+ learning rate ratio
   - `global_batch_size` (int): Global batch size
   - `max_length` (int): Maximum sequence length
+  - `model_name_or_path` (str): S3 checkpoint path or a SageMaker Model Package ARN for iterative training
   - A full list of available overrides can be found via the [Nova Customization public documentation](https://docs.aws.amazon.com/nova/latest/userguide/customize-fine-tune-sagemaker.html) or by referencing the training recipes [here](https://docs.aws.amazon.com/sagemaker/latest/dg/nova-model-recipes.html).
 - `rft_lambda_arn` (Optional[str]): Rewards Lambda ARN (only used for RFT training methods). If passed, takes priority over `rft_lambda_arn` set on the `RuntimeManager`.
 - `validation_data_s3_path` (Optional[str]): Validation S3 path, applicable for CPT and SFT on SMTJ/SMTJServerless/SMHP, or any method on Bedrock (optional)
@@ -225,8 +226,8 @@ def train(
  - `started_time` (datetime): Job start timestamp
  - `model_artifacts` (ModelArtifacts): Paths to model checkpoints and outputs
    - `checkpoint_s3_path` (str, Optional): Path to the model checkpoint/trained model. For `SMTJServerless`, populated after job completion via `get_model_artifacts()`.
-   - `output_s3_path` (str): Path to the metrics and output tar file.
-   - `output_model_arn` (str, Optional): Model package ARN for `SMTJServerless` jobs. Use as `model_path` for iterative training.
+   - `output_s3_path` (str, Optional): Path to the metrics and output tar file. For MTRL jobs, fetched from the AgentRFT API.
+   - `output_model_arn` (str, Optional): Model package ARN for `SMTJServerless` jobs. Use as `model_arn` in `ForgeTrainer` for iterative training.
  - `model_type` (Model): Model type of the model being trained
 
 **Raises:**
@@ -382,7 +383,7 @@ def deploy(
 * **Note:** If `model_artifact_path` is provided, we will NOT attempt to resolve `model_artifact_path` from `job_result` or the enclosing `NovaModelCustomizer` object.
 
 **Parameters:**
-- `model_artifact_path` (Optional[str]): S3 path to the trained model checkpoint. If not provided, will attempt to extract from job_result or the `job_id` field of the Customizer.
+- `model_artifact_path` (Optional[str]): S3 path to the trained model checkpoint, or a SageMaker Model Package name/ARN. Model package ARNs are auto-detected for SageMaker deployments and passed via `ModelPackageName`. If not provided, will attempt to extract from job_result or the `job_id` field of the Customizer.
 - `deploy_platform` (DeployPlatform): Platform to deploy the model to
  - `DeployPlatform.BEDROCK_OD`: Bedrock On-Demand
  - `DeployPlatform.BEDROCK_PT`: Bedrock Provisioned Throughput
@@ -432,6 +433,15 @@ sagemaker_deployment = customizer.deploy(
 print(f"Model deployed: {sagemaker_deployment.endpoint.uri}")
 print(f"Endpoint: {sagemaker_deployment.endpoint.endpoint_name}")
 print(f"Status: {sagemaker_deployment.status}")
+
+# Deploy to SageMaker using a model package ARN (auto-detected)
+sagemaker_mp_deployment = customizer.deploy(
+ model_artifact_path="arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1",
+ deploy_platform=DeployPlatform.SAGEMAKER,
+ unit_count=1,
+ endpoint_name="my-model-package-endpoint",
+)
+print(f"Model deployed: {sagemaker_mp_deployment.endpoint.uri}")
 ```
 
 Optionally, you can provide a Bedrock execution role name to be used in deployment.
@@ -454,11 +464,15 @@ create_bedrock_execution_role(
 ```
 ---
 #### `create_custom_model()`
-Creates a Bedrock custom model from S3 artifacts, decoupled from endpoint deployment.
+Creates a Bedrock custom model from S3 artifacts or a model package ARN, decoupled from endpoint deployment.
 
 This method extracts the model-creation step from the deploy flow so users can
 create a model independently of endpoint deployment, enabling retry of deployment
 if it fails after model creation.
+
+Either `model_artifact_path` (maps to `modelSourceConfig`) or `custom_model_data_source`
+(maps to `customModelDataSource`) must be provided, but not both. If neither is provided,
+the method attempts to resolve from `job_result`.
 
 **Signature:**
 ```python
@@ -470,26 +484,28 @@ def create_custom_model(
   execution_role_name: Optional[str] = None,
   tags: Optional[List[Dict[str, str]]] = None,
   skip_model_reuse: bool = False,
+  custom_model_data_source: Optional[Dict[str, Any]] = None,
 ) -> ModelDeployResult
 ```
 
 **Parameters:**
-- `model_artifact_path` (Optional[str]): S3 path to trained model checkpoint. Takes precedence over `job_result` if both are provided.
+- `model_artifact_path` (Optional[str]): S3 path to trained model checkpoint. Used to populate `modelSourceConfig.s3DataSource.s3Uri`. Takes precedence over `job_result` if both are provided.
 - `job_result` (Optional[TrainingResult]): Training job result to extract checkpoint path from.
 - `endpoint_name` (Optional[str]): Optional name prefix for the model name (auto-generated if not provided).
 - `execution_role_name` (Optional[str]): IAM role name for Bedrock. Defaults to `BedrockDeployModelExecutionRole`.
 - `tags` (Optional[List[Dict[str, str]]]): Optional list of `{"key": str, "value": str}` dicts for source tracking.
 - `skip_model_reuse` (bool): If True, always create a new model even if one with the same escrow URI already exists. Default: False.
+- `custom_model_data_source` (Optional[Dict[str, Any]]): Alternative data source configuration for the custom model. When provided, `modelSourceConfig` is omitted from the API call.
 
 **Returns:**
 - `ModelDeployResult`: Contains:
   - `model_arn` (str): The Bedrock custom model ARN
   - `model_name` (str): The model name passed to CreateCustomModel
-  - `escrow_uri` (str): S3 artifacts path used to create the model
+  - `escrow_uri` (str): S3 artifacts path or model package ARN used to create the model
   - `created_at` (datetime): UTC timestamp when the model was created
 
 **Raises:**
-- `ValueError`: When neither `model_artifact_path` nor `job_result` is provided, or when checkpoint path cannot be resolved from `job_result`.
+- `ValueError`: When neither `model_artifact_path`, `job_result`, nor `custom_model_data_source` is provided, or when both `model_artifact_path` and `custom_model_data_source` are provided.
 - `RuntimeError`: When IAM role creation or custom model creation fails.
 
 **Example:**
@@ -505,6 +521,16 @@ publish_result.dump(file_path="./results/")
 
 # Or create from a training job result
 publish_result = customizer.create_custom_model(job_result=training_result)
+
+# Or create from a model package ARN
+publish_result = customizer.create_custom_model(
+  custom_model_data_source={
+      "modelPackageArnDataSource": {
+          "modelPackageArn": "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1"
+      }
+  }
+)
+print(f"Model ARN: {publish_result.model_arn}")
 ```
 ---
 #### `deploy_to_bedrock()`

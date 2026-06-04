@@ -67,6 +67,7 @@ def __init__(
     infra: RuntimeManager,
     training_data_s3_path: Optional[str] = None,
     model_s3_path: Optional[str] = None,
+    model_arn: Optional[str] = None,
     data_mixing_enabled: bool = False,
     holdout_data_s3_path: Optional[str] = None,
     val_check_interval: Optional[int] = None,
@@ -83,7 +84,8 @@ def __init__(
 - `method` (TrainingMethod): The fine-tuning method (e.g., `TrainingMethod.SFT_LORA`, `TrainingMethod.RFT`)
 - `infra` (RuntimeManager): Runtime infrastructure manager (e.g., `SMTJRuntimeManager`, `SMHPRuntimeManager`, `BedrockRuntimeManager`)
 - `training_data_s3_path` (Optional[str]): S3 path to the training dataset
-- `model_s3_path` (Optional[str]): S3 path for the base or previously trained model
+- `model_s3_path` (Optional[str]): S3 path for the base or previously trained model (SMHP/SMTJ). For SMTJServerless, use `model_arn` instead.
+- `model_arn` (Optional[str]): Model package ARN for iterative training on SMTJServerless. Pass the `output_model_arn` from a previous job to train on top of it. Cannot be combined with `model_s3_path`.
 - `data_mixing_enabled` (bool): Enable data mixing for CPT and SFT training on SMHP, and SFT text-only on Nova Lite 2 on SMTJServerless. Default: False
 - `holdout_data_s3_path` (Optional[str]): S3 path to holdout/validation data (optional, used for CPT and SFT on SMTJ/SMTJServerless/SMHP, or any method on Bedrock)
 - `val_check_interval` (Optional[int]): How often (in training steps) to run validation. Defaults to 2500 if omitted. Only used when `holdout_data_s3_path` is provided.
@@ -293,6 +295,59 @@ matched_file = trainer.trace_batch(result, step=42, output_path="/tmp/flagged.js
 ```
 ---
 
+##### `generate_training_metrics_csv()`
+
+Generates a `step_wise_training_metrics.csv` file from CloudWatch logs for a completed SMHP SFT training job and uploads it to S3. The CSV contains step-level metrics (step number, epoch number, training loss) in the same format produced by SMTJ/Bedrock SFT jobs.
+
+**Signature:**
+```python
+def generate_training_metrics_csv(
+    self,
+    job_result: Optional[SMHPTrainingResult] = None,
+    job_id: Optional[str] = None,
+    started_time=None,
+    end_time=None,
+    output_s3_path: Optional[str] = None,
+) -> Optional[str]
+```
+
+**Parameters:**
+- `job_result` (Optional[SMHPTrainingResult]): Result from a completed SMHP training job. If provided, `job_id`, `started_time`, and `output_s3_path` are extracted automatically.
+- `job_id` (Optional[str]): The SMHP training job ID. Used if `job_result` is not provided.
+- `started_time`: Start time for log filtering. Accepts a `datetime` object or an ISO date string (e.g., `"2025-05-26"`). Defaults to 7 days ago if not provided.
+- `end_time`: Optional end time to bound the log search. Accepts a `datetime` object or an ISO date string. If not provided, searches up to the current time. Providing this significantly speeds up log retrieval for older jobs.
+- `output_s3_path` (Optional[str]): S3 URI for the output. Defaults to the trainer's configured `output_s3_path`.
+
+**Returns:**
+- `str | None`: S3 URI of the uploaded CSV (e.g., `s3://bucket/prefix/job-id/step_wise_training_metrics.csv`), or `None` if no metrics could be extracted.
+
+**Raises:**
+- `ValueError`: If platform is not SMHP, method is not SFT_LORA/SFT_FULL, or required parameters are missing.
+
+**Example:**
+```python
+# From a job result (simplest)
+result = trainer.train(job_name="my-sft-job")
+csv_uri = trainer.generate_training_metrics_csv(job_result=result)
+
+# Standalone with job ID
+csv_uri = trainer.generate_training_metrics_csv(
+    job_id="my-job-id",
+    started_time="2026-04-17",
+    end_time="2026-04-18",
+)
+
+# Minimal — uses trainer's output_s3_path and defaults to 7-day lookback
+csv_uri = trainer.generate_training_metrics_csv(job_id="my-job-id")
+```
+
+**Notes:**
+- Only supported for SMHP platform with SFT_LORA or SFT_FULL training methods.
+- For older jobs, providing `started_time` and `end_time` significantly reduces log retrieval time.
+- If the job is still in progress or has failed, a warning is emitted but metrics are still extracted on a best-effort basis.
+
+---
+
 ### ForgeEvaluator
 
 Handles evaluation job configuration and execution for Nova models.
@@ -361,7 +416,7 @@ def evaluate(
 - `job_name` (str): User-defined name for the evaluation job
 - `eval_task` (EvaluationTask): The evaluation task (e.g., `EvaluationTask.MMLU`)
 - `model_path` (Optional[str]): S3 path to the model to evaluate. If not provided, extracted from `job_result`
-- `task_config` (Optional[EvalTaskConfig]): Task-specific configuration. Fields: `subtask`, `processor`, `rl_env`, `override_data_s3_path`
+- `task_config` (Optional[EvalTaskConfig]): Task-specific configuration. Fields: `subtask`, `processor`, `rl_env`, `override_data_s3_path`, `evaluate_base_model` (MTRL only — when True, evaluates both base and fine-tuned model in one pipeline)
 - `recipe_path` (Optional[str]): Path for a YAML recipe file (S3 or local)
 - `overrides` (Optional[Dict[str, Any]]): Inference configuration overrides (e.g., `max_new_tokens`, `temperature`, `top_p`)
 - `dry_run` (bool): If True, performs validation only. Default: False
@@ -609,11 +664,12 @@ def deploy(
     sagemaker_instance_type: str = "ml.p5.48xlarge",
     sagemaker_environment: Optional[SageMakerEndpointEnvironment] = None,
     skip_model_reuse: bool = False,
+    inference_component_configs: List[InferenceComponentConfig] = [],
 ) -> DeploymentResult
 ```
 
 **Parameters:**
-- `model_artifact_path` (str): S3 path to the trained model checkpoint
+- `model_artifact_path` (str): S3 path to the trained model checkpoint, or a SageMaker Model Package name/ARN. Model package ARNs are auto-detected for SageMaker deployments and passed via `ModelPackageName`
 - `deploy_platform` (DeployPlatform): Platform to deploy to (`BEDROCK_OD`, `BEDROCK_PT`, or `SAGEMAKER`). Default: `BEDROCK_OD`
 - `endpoint_name` (Optional[str]): Name of the endpoint (auto-generated if not provided)
 - `unit_count` (int): Number of PT units (Bedrock PT) or instances (SageMaker). Default: 1
@@ -625,6 +681,7 @@ def deploy(
   - Optional speculative decoding: `SPECULATIVE_DECODING_METHOD` (`"eagle3"` or `"suffix"`), `DISABLE_SPECULATIVE_DECODING` (`"true"` or `"false"`), `NUM_SPECULATIVE_TOKENS` (1–10), `SUFFIX_DECODING_MAX_TREE_DEPTH`, `SUFFIX_DECODING_MAX_CACHED_REQUESTS`, `SUFFIX_DECODING_MAX_SPEC_FACTOR`, `SUFFIX_DECODING_MIN_TOKEN_PROB`
   - Optional memory/quantization: `KV_CACHE_DTYPE` (`"fp8"`), `QUANTIZATION_DTYPE` (`"fp8"`)
 - `skip_model_reuse` (bool): If True, always create a new model. Default: False
+- `inference_component_configs` (List[InferenceComponentConfig]): List of inference component configs. When provided with `SAGEMAKER` platform, creates an IC-compatible endpoint and deploys the inference component(s) in one step.
 
 **Returns:**
 - `DeploymentResult`: Contains `endpoint` (EndpointInfo), `platform`, `endpoint_name`, `uri`, `model_artifact_path`, and `created_at`
@@ -635,47 +692,75 @@ def deploy(
 
 **Example:**
 ```python
+# Deploy from S3 artifacts to Bedrock
 deployment = deployer.deploy(
     model_artifact_path="s3://escrow-bucket/my-model-artifacts/",
     deploy_platform=DeployPlatform.BEDROCK_OD,
     endpoint_name="my-custom-nova-model"
 )
 print(f"Model deployed: {deployment.endpoint.uri}")
+
+# Deploy to SageMaker using a model package ARN (auto-detected)
+deployment = deployer.deploy(
+    model_artifact_path="arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1",
+    deploy_platform=DeployPlatform.SAGEMAKER,
+    unit_count=1,
+    sagemaker_instance_type="ml.p5.48xlarge",
+)
+print(f"Model deployed: {deployment.endpoint.uri}")
 ```
 ---
 
 ##### `create_custom_model()`
-Creates a Bedrock custom model from S3 artifacts without deploying to an endpoint.
+Creates a Bedrock custom model from S3 artifacts or a model package ARN without deploying to an endpoint.
+
+Either `model_artifact_path` (maps to `modelSourceConfig`) or `custom_model_data_source` (maps to `customModelDataSource`) must be provided, but not both.
 
 **Signature:**
 ```python
 def create_custom_model(
     self,
-    model_artifact_path: str,
+    model_artifact_path: Optional[str] = None,
     endpoint_name: Optional[str] = None,
     execution_role_name: Optional[str] = None,
     tags: Optional[List[Dict[str, str]]] = None,
     skip_model_reuse: bool = False,
+    custom_model_data_source: Optional[Dict[str, Any]] = None,
 ) -> ModelDeployResult
 ```
 
 **Parameters:**
-- `model_artifact_path` (str): S3 path to trained model checkpoint
+- `model_artifact_path` (Optional[str]): S3 path to trained model checkpoint. Used to populate `modelSourceConfig.s3DataSource.s3Uri`
 - `endpoint_name` (Optional[str]): Optional name prefix for the model name
 - `execution_role_name` (Optional[str]): IAM role name for Bedrock
 - `tags` (Optional[List[Dict[str, str]]]): Optional list of `{"key": str, "value": str}` dicts for tracking
 - `skip_model_reuse` (bool): If True, always create a new model. Default: False
+- `custom_model_data_source` (Optional[Dict[str, Any]]): Alternative data source configuration for the custom model. When provided, `modelSourceConfig` is omitted from the API call
 
 **Returns:**
 - `ModelDeployResult`: Contains `model_arn`, `model_name`, `escrow_uri`, and `created_at`
 
+**Raises:**
+- `ValueError`: If neither or both of `model_artifact_path` and `custom_model_data_source` are provided
+
 **Example:**
 ```python
+# Create from S3 artifacts
 publish_result = deployer.create_custom_model(
     model_artifact_path="s3://escrow-bucket/my-model-artifacts/"
 )
 print(f"Model ARN: {publish_result.model_arn}")
 publish_result.dump(file_path="./results/")
+
+# Create from a model package ARN
+publish_result = deployer.create_custom_model(
+    custom_model_data_source={
+        "modelPackageArnDataSource": {
+            "modelPackageArn": "arn:aws:sagemaker:us-east-1:123456789012:model-package/my-group/1"
+        }
+    }
+)
+print(f"Model ARN: {publish_result.model_arn}")
 ```
 ---
 
@@ -816,6 +901,78 @@ def get_logs(
 **Returns:**
 - None (prints logs to console)
 
+---
+
+##### `create_inference_component()`
+Creates an inference component on an existing SageMaker endpoint. Returns immediately without waiting for the component to become active.
+
+**Signature:**
+```python
+def create_inference_component(
+    self,
+    inference_component_name: str,
+    model_name: str,
+    num_cpus: int,
+    num_accelerators: int,
+    min_memory_in_mb: int,
+    endpoint_name: str,
+    variant_name: str = "primary",
+    copy_count: int = 1,
+) -> DeploymentResult
+```
+
+**Parameters:**
+- `inference_component_name` (str): Unique name for the inference component
+- `model_name` (str): Name of the existing SageMaker model to use
+- `num_cpus` (int): Number of vCPUs to allocate
+- `num_accelerators` (int): Number of accelerators (GPUs) to allocate
+- `min_memory_in_mb` (int): Minimum memory in MB to allocate
+- `endpoint_name` (str): Name of the existing SageMaker endpoint (must be InService)
+- `variant_name` (str): Production variant name on the endpoint. Default: `"primary"`
+- `copy_count` (int): Number of model copies to deploy. Default: 1
+
+**Returns:**
+- `DeploymentResult`: Contains endpoint info with the inference component ARN as the URI and the deployer's `region` set on `EndpointInfo`
+
+**Raises:**
+- `Exception`: If the endpoint does not exist, is not InService, or the API call fails
+
+**Example:**
+```python
+result = deployer.create_inference_component(
+    inference_component_name="my-model-ic",
+    model_name="my-sagemaker-model",
+    num_cpus=15,
+    num_accelerators=4,
+    min_memory_in_mb=25000,
+    endpoint_name="my-endpoint",
+)
+print(f"Inference component ARN: {result.endpoint.uri}")
+```
+---
+
+##### `monitor_inference_component()`
+Polls an inference component until it reaches a terminal state (InService or Failed).
+
+**Signature:**
+```python
+def monitor_inference_component(self, inference_component_name: str) -> str
+```
+
+**Parameters:**
+- `inference_component_name` (str): Name of the inference component to monitor
+
+**Returns:**
+- `str`: Final status (`"InService"`)
+
+**Raises:**
+- `Exception`: If the component reaches Failed status or the API call errors
+
+**Example:**
+```python
+status = deployer.monitor_inference_component(inference_component_name="my-model-ic")
+print(f"Inference component is now: {status}")
+```
 ---
 
 ### ForgeInference

@@ -220,9 +220,32 @@ class RFTMultiturnDatasetSample(BaseModel):
         return v.strip()
 
 
+class RFTMultiturnServerlessSample(BaseModel):
+    """
+    Represents an RFT Multiturn dataset sample for Serverless MTRL.
+
+    Expected format:
+    {
+        "prompt": str  # REQUIRED - the prompt string passed as-is to the agent
+    }
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    prompt: str
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt_not_empty(cls, v: str) -> str:
+        """Ensure prompt is not empty."""
+        if not v or not v.strip():
+            raise ValueError("'prompt' cannot be empty")
+        return v
+
+
 class RFTMultiturnDatasetValidator(BaseDatasetValidator):
     """
-    Validator for RFT Multiturn datasets in SDK format.
+    Validator for RFT Multiturn datasets in SDK format (HyperPod).
 
     RFT Multiturn is only supported on Nova 2.0 and requires:
     - Unique sample IDs
@@ -268,3 +291,29 @@ class RFTMultiturnDatasetValidator(BaseDatasetValidator):
             OPTIONAL_FIELDS: A list of all the optional fields for RFT Multiturn.
         """
         return OPTIONAL_FIELDS
+
+
+class RFTMultiturnServerlessValidator(BaseDatasetValidator):
+    """
+    Validator for RFT Multiturn datasets in Serverless format.
+
+    Validates flat format: {"prompt": str}
+    The service reads only the prompt column and passes it as-is to the agent.
+    """
+
+    def __init__(self, model: Model):
+        super().__init__()
+        if model != Model.NOVA_LITE_2:
+            raise ValueError(
+                f"RFT Multiturn is only supported on Nova 2.0 Lite (NOVA_LITE_2). "
+                f"Current model: {model}."
+            )
+
+    def get_sample_model(self):
+        return RFTMultiturnServerlessSample
+
+    def get_success_message(self) -> str:
+        return f"Validation succeeded for {self.num_samples} samples on a Serverless RFT Multiturn dataset."
+
+    def get_optional_fields(self) -> List[str]:
+        return []

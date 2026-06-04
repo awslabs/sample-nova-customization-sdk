@@ -102,7 +102,7 @@ class TestForgeInferenceInvoke(unittest.TestCase):
         mock_regex.match.assert_called_once_with(arn)
         mock_boto_client.assert_called_once_with("sagemaker-runtime", region_name="us-east-1")
         mock_invoke_sm.assert_called_once_with(
-            {"prompt": "hello"}, "my-endpoint", mock_runtime_client
+            {"prompt": "hello"}, "my-endpoint", mock_runtime_client, inference_component_name=None
         )
         self.assertEqual(result, {"result": "ok"})
 

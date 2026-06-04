@@ -901,3 +901,59 @@ class DatasetTransformer:
             metadata["info"] = rec[info_col]
 
         return {"id": generated_id, "metadata": metadata}
+
+    @staticmethod
+    def _extract_prompt(rec, column_mappings) -> str:
+        """Extract prompt value from a record, checking multiple input formats.
+
+        Resolution order:
+        1. Top-level "prompt" key
+        2. Nested "metadata.prompt"
+        3. Column mapping for "prompt"
+
+        Returns the prompt as a string (serializes dicts/lists to JSON).
+        """
+        if "prompt" in rec:
+            prompt_value = rec["prompt"]
+        elif (
+            "metadata" in rec and isinstance(rec["metadata"], dict) and "prompt" in rec["metadata"]
+        ):
+            prompt_value = rec["metadata"]["prompt"]
+        else:
+            prompt_col = column_mappings.get("prompt")
+            if not prompt_col:
+                raise ValueError(
+                    "'prompt' column mapping is required for RFT Multiturn Serverless.\n"
+                    "Make sure to add prompt='your_column_name' when initializing DatasetLoader."
+                )
+            if prompt_col not in rec:
+                raise ValueError(
+                    f"'prompt' column '{prompt_col}' not found in record.\n"
+                    f"Make sure the column exists in your data."
+                )
+            prompt_value = rec[prompt_col]
+
+        if isinstance(prompt_value, (dict, list)):
+            prompt_value = json.dumps(prompt_value)
+
+        return prompt_value
+
+    @staticmethod
+    def convert_to_rft_multiturn_serverless(
+        rec, column_mappings, transform_ctx=None, s3_client=None
+    ):
+        """Convert to flat RFT multiturn format for Serverless MTRL.
+
+        The Serverless MTRL service reads only the `prompt` column and passes
+        it as-is to the agent/rollout server. This transformer outputs the flat
+        format: {"prompt": "<string>"}.
+
+        Args:
+            rec: A single dataset record (dict). Can have a "prompt" field directly,
+                or use column_mappings to locate the prompt column.
+            column_mappings: Dictionary mapping field names to column names.
+
+        Returns:
+            dict: Record with flat structure: {"prompt": str}
+        """
+        return {"prompt": DatasetTransformer._extract_prompt(rec, column_mappings)}

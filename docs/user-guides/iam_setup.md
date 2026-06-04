@@ -161,6 +161,14 @@ Please refer to the "Sid" of each statement to determine which policies you need
             ]
         },
         {
+            "Sid": "AccessModelPackageForDeployment",
+            "Effect": "Allow",
+            "Action": [
+                "sagemaker:AccessModelPackage"
+            ],
+            "Resource": "arn:aws:sagemaker:<region>:<account_id>:model-package/*"
+        },
+        {
             "Sid": "MLflowSageMaker",
             "Effect": "Allow",
             "Action": [
@@ -218,8 +226,94 @@ Please refer to the "Sid" of each statement to determine which policies you need
 
     Data mixing fetches recipe templates from a cross-account S3 access point owned by the Nova Forge service.
     The resource is scoped to S3 access point ARNs, which allows cross-account access point calls while preventing read access to arbitrary S3 bucket objects.
+- [Model Package only] `AccessModelPackage` (`sagemaker:AccessModelPackage`) is required when deploying or evaluating a model using a SageMaker Model Package ARN.
 - [HyperPod only] If your cluster uses namespace access control, you must have access to the Kubernetes namespace
 - [CloudWatch data loading only] `logs:StartQuery` and `logs:GetQueryResults` in the `AccessCloudWatchLogs` statement are required when using `CloudWatchDatasetLoader`. The other actions in that statement (`DescribeLogStreams`, `FilterLogEvents`, `GetLogEvents`) are used for job log monitoring and are not needed for data loading.
+
+### Multi-Turn RL (MTRL) on Serverless SMTJ
+
+If performing MTRL training or evaluation, your execution role needs the following additional permissions (beyond the basic SDK policies above):
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "MTRLJobManagement",
+            "Effect": "Allow",
+            "Action": [
+                "sagemaker:CreateJob",
+                "sagemaker:DescribeJob",
+                "sagemaker:StopJob"
+            ],
+            "Resource": "arn:aws:sagemaker:<region>:<account_id>:job/*"
+        },
+        {
+            "Sid": "MTRLAgentCoreAccess",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:GetAgentRuntime",
+                "bedrock-agentcore:InvokeAgentRuntime"
+            ],
+            "Resource": "arn:aws:bedrock-agentcore:<region>:<account_id>:runtime/*"
+        },
+        {
+            "Sid": "MTRLModelPackageManagement",
+            "Effect": "Allow",
+            "Action": [
+                "sagemaker:CreateModelPackageGroup",
+                "sagemaker:CreateModelPackage",
+                "sagemaker:DescribeModelPackage",
+                "sagemaker:DescribeModelPackageGroup",
+                "sagemaker:ListModelPackages",
+                "sagemaker:UpdateModelPackage"
+            ],
+            "Resource": [
+                "arn:aws:sagemaker:<region>:<account_id>:model-package/*",
+                "arn:aws:sagemaker:<region>:<account_id>:model-package-group/*"
+            ]
+        },
+        {
+            "Sid": "MTRLEvalPipeline",
+            "Effect": "Allow",
+            "Action": [
+                "sagemaker:CreatePipeline",
+                "sagemaker:StartPipelineExecution",
+                "sagemaker:DescribePipelineExecution",
+                "sagemaker:ListPipelineExecutionSteps",
+                "sagemaker:StopPipelineExecution",
+                "sagemaker:UpdatePipeline"
+            ],
+            "Resource": "arn:aws:sagemaker:<region>:<account_id>:pipeline/*"
+        }
+    ]
+}
+```
+
+If using a **Lambda function as a 3P agent** (instead of Bedrock AgentCore directly), also add:
+```json
+{
+    "Sid": "MTRLLambdaAgentInvoke",
+    "Effect": "Allow",
+    "Action": "lambda:InvokeFunction",
+    "Resource": "arn:aws:lambda:<region>:<account_id>:function:<your-agent-lambda>"
+}
+```
+
+**Trust Policy:** The execution role must include these service principals:
+```json
+{
+    "Effect": "Allow",
+    "Principal": {
+        "Service": [
+            "job.sagemaker.amazonaws.com",
+            "finetuning.sagemaker.amazonaws.com",
+            "bedrock-agentcore.amazonaws.com"
+        ]
+    },
+    "Action": ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"]
+}
+```
 
 ### Job Monitoring via Email Notifications
 

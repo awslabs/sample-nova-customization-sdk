@@ -28,6 +28,7 @@ _BENIGN_WARNING_NAMES = [
     r"DeprecationWarning:",
     r"FutureWarning:",
     r"InsecureRequestWarning:",
+    r"RequestsDependencyWarning:",
     r"ResourceWarning:",
     r"UserWarning:",
     r"urllib3\.[a-zA-Z_]+Warning:",

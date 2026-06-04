@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from amzn_nova_forge.core.enums import EvaluationTask, Model, TrainingMethod
+from amzn_nova_forge.core.enums import EvaluationTask, Model, Platform, TrainingMethod
 from amzn_nova_forge.dataset import JSONLDatasetLoader
 
 
@@ -75,7 +75,11 @@ class TestRFTMultiturnToolCalling:
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -138,7 +142,11 @@ class TestRFTMultiturnToolCalling:
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -166,7 +174,11 @@ class TestRFTMultiturnToolCalling:
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt", answer="answer")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -213,7 +225,11 @@ class TestRFTMultiturnToolCalling:
         try:
             loader = JSONLDatasetLoader(id="id", prompt="prompt")
             loader.load(temp_path)
-            loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+            loader.transform(
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
+            )
             loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -243,7 +259,11 @@ class TestRFTMultiturnToolCalling:
             with pytest.raises(ValueError):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -272,7 +292,11 @@ class TestRFTMultiturnToolCalling:
             with pytest.raises(ValueError):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -295,7 +319,11 @@ class TestRFTMultiturnToolCalling:
             with pytest.raises(ValueError):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -333,7 +361,11 @@ class TestRFTMultiturnToolCalling:
             with pytest.raises(ValueError):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -359,7 +391,11 @@ class TestRFTMultiturnToolCalling:
             with pytest.raises(ValueError, match="Extra inputs are not permitted"):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -385,7 +421,11 @@ class TestRFTMultiturnToolCalling:
             with pytest.raises(ValueError, match="Extra inputs are not permitted"):
                 loader = JSONLDatasetLoader(id="id", prompt="prompt")
                 loader.load(temp_path)
-                loader.transform(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
+                loader.transform(
+                    method=TrainingMethod.RFT_MULTITURN_LORA,
+                    model=Model.NOVA_LITE_2,
+                    platform=Platform.SMHP,
+                )
                 loader.validate(method=TrainingMethod.RFT_MULTITURN_LORA, model=Model.NOVA_LITE_2)
         finally:
             Path(temp_path).unlink()
@@ -416,6 +456,7 @@ class TestRFTMultiturnToolCalling:
                 method=TrainingMethod.EVALUATION,
                 eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
                 model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
             )
 
             # Validate with EVALUATION method and RFT_MULTITURN_EVAL task
@@ -477,6 +518,7 @@ class TestRFTMultiturnToolCalling:
                 method=TrainingMethod.EVALUATION,
                 eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
                 model=Model.NOVA_LITE_2,
+                platform=Platform.SMHP,
             )
 
             # Validate with EVALUATION method and RFT_MULTITURN_EVAL task

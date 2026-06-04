@@ -1,226 +1,294 @@
 # RFT Multiturn
 
-The Nova Forge SDK supports RFT (Reinforcement Fine-Tuning) multiturn training for multi-turn conversational tasks. This module provides infrastructure management and orchestration for running RFT training with custom reward environments.
+The Nova Forge SDK supports RFT (Reinforcement Fine-Tuning) multiturn training for multi-turn conversational tasks. There are two deployment options:
+
+- **Serverless (SMTJServerless)**: Fully managed, no infrastructure setup required. Uses Bedrock AgentCore or a custom Lambda function as the agent environment.
+- **HyperPod (SMHP)**: Self-managed infrastructure on SageMaker HyperPod with custom reward environments deployed on LOCAL, EC2, or ECS.
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Infrastructure Setup](#infrastructure-setup)
+- [Serverless MTRL](#serverless-mtrl)
+  - [Prerequisites](#serverless-prerequisites)
+  - [Quick Start](#serverless-quick-start)
+  - [Training](#serverless-training)
+  - [Monitoring](#serverless-monitoring)
+  - [Iterative Training](#iterative-training)
+  - [Model Artifacts](#retrieving-model-artifacts)
+  - [Evaluation](#serverless-evaluation)
+  - [Save and Load Results](#save-and-load-results)
 - [Dataset Format](#dataset-format)
-- [Training](#training)
-- [Evaluation](#evaluation)
-- [Monitoring](#monitoring)
-- [Custom Environments](#custom-environments)
-- [Helper Functions](#helper-functions)
-- [Cleanup](#cleanup)
+- [HyperPod MTRL](#hyperpod-mtrl)
+  - [Overview](#overview)
+  - [Prerequisites](#hyperpod-prerequisites)
+  - [Quick Start](#hyperpod-quick-start)
+  - [Infrastructure Setup](#infrastructure-setup)
+  - [Training](#hyperpod-training)
+  - [Evaluation](#hyperpod-evaluation)
+  - [Monitoring](#hyperpod-monitoring)
+  - [Custom Environments](#custom-environments)
+  - [Helper Functions](#helper-functions)
+  - [Cleanup](#cleanup)
 - [Platform Support](#platform-support)
 
-## Overview
+---
 
-RFT Multiturn enables you to fine-tune Nova models using reinforcement learning with custom reward functions. The infrastructure can be deployed on three platforms:
+## Serverless MTRL
 
-- **LOCAL**: Runs on your local machine
-- **EC2**: Runs on an AWS EC2 instance
-- **ECS**: Runs on AWS ECS Fargate
+Serverless MTRL uses `SMTJServerlessRuntimeManager` with a Bedrock AgentCore runtime or a custom Lambda function as the agent environment. No infrastructure setup, no HyperPod cluster — just configure and train.
 
-## Prerequisites
-
-### General Requirements
+### Serverless Prerequisites
 
 - Python 3.12
 - AWS credentials configured
-- The SDK requires specific IAM permissions. See the [IAM Roles/Policies section in the main README](../README.md#iam-rolespolicies) for the complete list of required permissions.
-dditional SSM and ECS permissions are required - see the "If performing RFT Multiturn training" section in the README
-- SageMaker HyperPod cluster (for training)
+- A Bedrock AgentCore runtime deployed
+- S3 bucket with training prompts (parquet format)
+- IAM execution role with SageMaker permissions
+- `sagemaker-train` wheel installed (`pip install sagemaker_train-*.whl sagemaker_core-*.whl`)
 
-### Platform-Specific Requirements
+### Serverless Quick Start
 
-#### For LOCAL Platform or SageMaker Notebook
-
-- Python 3.12 installed locally
-- Sufficient local compute resources
-
-#### For EC2 Platform
-
-Requirements:
-- EC2 instance launched with **Amazon Linux 2023** ([guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/LaunchingAndUsingInstances.html))
-- Recommended instance type: `r5.24xlarge` or similar
-- SSM access enabled on the instance
-- IAM permissions for SSM commands
-
-#### For ECS Platform
-
-- ECS cluster with Fargate ([guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-cluster-console-v2.html))
-- VPC with subnets and security groups configured
-- IAM permissions for ECS task management
-
-## Quick Start
+This quickstart uses Bedrock AgentCore as the agent environment for MTRL training.
 
 ```python
 from amzn_nova_forge import *
 
-# 1. Setup infrastructure (LOCAL example)
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    python_venv_name="my_rft_venv",
-    vf_env_id=VFEnvId.WORDLE  # Built-in environment
+# 1. Configure runtime
+runtime = SMTJServerlessRuntimeManager(
+    model_package_group_name="my-model-package-group",
+    execution_role="arn:aws:iam::123456789012:role/my-role",
+    agent_core_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent",
 )
 
-# Deploy infrastructure
-rft_infra.setup()
-
-# Start training environment
-rft_infra.start_environment(env_type=EnvType.TRAIN)
-
-# 2. Train model
+# 2. Train
 trainer = ForgeTrainer(
     model=Model.NOVA_LITE_2,
     method=TrainingMethod.RFT_MULTITURN_LORA,
-    infra=SMHPRuntimeManager(
-        cluster_name="my-cluster",
-        namespace="kubeflow",
-        instance_type="ml.p5.48xlarge",
-        instance_count=2
+    infra=runtime,
+    training_data_s3_path="s3://bucket/prompts/train.parquet",
+    config=ForgeConfig(output_s3_path="s3://bucket/output/"),
+)
+
+result = trainer.train(job_name="my-mtrl-job")
+
+# 3. Wait and get output model
+result.wait()
+print(result.model_artifacts.output_model_arn)
+```
+
+### Serverless Training
+
+#### SMTJServerlessRuntimeManager
+
+```python
+# Option 1: Using Bedrock AgentCore
+runtime = SMTJServerlessRuntimeManager(
+    model_package_group_name="my-mpg",           # Required: output model package group
+    execution_role="arn:aws:iam::123456789012:role/my-execution-role",   # Required: IAM role
+    agent_core_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent",  # Bedrock AgentCore runtime
+    intermediate_model_package_group_name="my-checkpoints",     # Optional: for intermediate checkpoints
+    kms_key_id="arn:aws:kms:us-east-1:123456789012:key/my-key-id",  # Optional: encryption
+    subnets=["subnet-123"],                       # Optional: VPC config
+    security_group_ids=["sg-123"],                # Optional: VPC config
+)
+
+# Option 2: Using a custom Lambda function
+runtime = SMTJServerlessRuntimeManager(
+    model_package_group_name="my-mpg",
+    execution_role="arn:aws:iam::123456789012:role/my-execution-role",
+    rft_lambda="arn:aws:lambda:us-east-1:123456789012:function:my-reward-fn",  # Lambda ARN
+)
+```
+
+#### ForgeTrainer for MTRL
+
+```python
+trainer = ForgeTrainer(
+    model=Model.NOVA_LITE_2,
+    method=TrainingMethod.RFT_MULTITURN_LORA,
+    infra=runtime,
+    training_data_s3_path="s3://bucket/prompts/train.parquet",
+    model_arn=None,  # Set for iterative training (model package ARN from previous MTRL job)
+    config=ForgeConfig(
+        output_s3_path="s3://bucket/output/",
+        mlflow_monitor=MLflowMonitor(tracking_uri="arn:aws:sagemaker:us-east-1:123456789012:mlflow-tracking-server/my-server"),
     ),
-    training_data_s3_path="s3://bucket/data.jsonl",
+    region="us-east-1",
 )
-
-training_result = trainer.train(
-    job_name="rft-training",
-    rft_multiturn_infra=rft_infra
-)
-
-# 3. Cleanup
-rft_infra.cleanup(delete_stack=True)
 ```
 
-## Infrastructure Setup
-
-### RFTMultiturnInfrastructure Constructor
-
-The `RFTMultiturnInfrastructure` class is the main entry point for managing RFT multiturn infrastructure.
-
-**Parameters:**
-
-- `stack_name` (str, required): CloudFormation stack name for Lambda/SQS/DynamoDB resources. Automatically appends `-NovaForgeSDK` suffix if not present.
-- `region` (str, required): AWS region for infrastructure deployment (e.g., `"us-east-1"`).
-- `infrastructure_arn` (str, optional, default: `None`): Platform identifier: EC2 instance ID/ARN or ECS cluster ARN. If `None`, uses LOCAL platform.
-- `python_venv_name` (str, conditional, default: `None`): Python virtual environment name. **Required for LOCAL and EC2**, optional for ECS.
-- `vf_env_id` (VFEnvId or str, optional, default: `None`): Built-in environment ID (e.g., `VFEnvId.WORDLE`). Mutually exclusive with `custom_env`.
-- `custom_env` (CustomEnvironment, optional, default: `None`): Custom environment object. Mutually exclusive with `vf_env_id`.
-- `starter_kit_path` (str, optional, default: `None`): Custom starter kit path. If not provided, uses default AWS starter kit.
-  - **LOCAL**: Local file path (e.g., `"~/my-starter-kit"` or `"/path/to/v1"`)
-  - **EC2/ECS**: Local path (auto-uploaded to S3) or S3 URI (e.g., `"s3://bucket/path/v1.tar.gz"`)
-- `rft_role_name` (str, optional, default: `"RFTExecutionRoleNovaSDK"`): IAM role name for RFT infrastructure permissions.
-- `custom_policy_path` (str, optional, default: `None`): Path to custom IAM policy JSON file. If not provided, uses SDK default policy.
-- `vpc_config` (dict, optional, default: uses cluster's default): **ECS only**: VPC configuration with `subnets` and `security_groups` keys.
-- `cpu` (str, optional, default: `"2048"`): **ECS only**: CPU units for Fargate task (e.g., `"4096"`).
-- `memory` (str, optional, default: `"4096"`): **ECS only**: Memory in MB for Fargate task (e.g., `"8192"`).
-
-#### Platform Detection
-
-The platform is automatically detected based on `infrastructure_arn`:
-- **LOCAL**: `infrastructure_arn` is `None`
-- **EC2**: `infrastructure_arn` which is ARN of EC2 instance or instance id starting with `i-`
-- **ECS**: `infrastructure_arn` which is ARN of ECS cluster
-
-### LOCAL Platform
+#### Training with Hyperparameter Overrides
 
 ```python
-from amzn_nova_forge import RFTMultiturnInfrastructure, VFEnvId
-
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    python_venv_name="my_rft_venv",  # Required for LOCAL
-    vf_env_id=VFEnvId.WORDLE
+result = trainer.train(
+    job_name="my-mtrl-job",
+    overrides={
+        "global_batch_size": 16,
+        "max_steps": 50,
+        "rollout_timeout": 600,
+        # "learning_rate": 4e-5,
+        # "lora_rank": 32,
+        # "lora_alpha": 64,
+        # "advantage_method": "group_based",
+        # "group_size": 8,
+        # "rollout_max_concurrency": 96,
+        # "sampling_temperature": 0.7,
+        # "top_p": 0.95,
+        # "save_every": 10,
+        # "eval_every": 10,
+    },
 )
-
-rft_infra.setup()
 ```
 
-### EC2 Platform
+### Serverless Monitoring
 
 ```python
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    infrastructure_arn="i-1234567890abcdef0",  # EC2 instance ID or full ARN
-    python_venv_name="my_rft_venv",  # Required for EC2
-    vf_env_id=VFEnvId.WORDLE 
-)
+from amzn_nova_forge.monitor import MTRLLogMonitor
 
-rft_infra.setup()
+# Live progress panel (blocks while job is running)
+monitor = MTRLLogMonitor.from_job_id(job_id=result.job_id, region="us-east-1")
+monitor.show_logs()
+
+# Check status
+status, raw_status = result.get_job_status()
+print(f"Status: {status.value} ({raw_status})")
+
+# View per-step training metrics (from MLflow)
+result.get_training_metrics()
 ```
 
-### ECS Platform
+### Iterative Training
+
+After an MTRL training job completes, continue training from the resulting model package using the `model_arn` parameter. This trains on top of the previous MTRL fine-tune rather than starting from the base model. The `model_arn` must be a model package ARN from a previous MTRL job (or an SFT checkpoint registered in a model package group).
 
 ```python
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    infrastructure_arn="arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster",
-    vf_env_id=VFEnvId.WORDLE,
-    vpc_config={
-        "subnets": ["subnet-12345", "subnet-67890"],
-        "security_groups": ["sg-12345"]
-    },  # Optional, uses cluster defaults if not provided
-    cpu="4096",      # Optional, defaults to "2048"
-    memory="8192"    # Optional, defaults to "4096"
+# Get the output model ARN from a completed job
+previous_model_arn = result.model_artifacts.output_model_arn
+
+# Create a new trainer with model_arn for iterative training
+iterative_trainer = ForgeTrainer(
+    model=Model.NOVA_LITE_2,
+    method=TrainingMethod.RFT_MULTITURN_LORA,
+    infra=runtime,
+    training_data_s3_path="s3://bucket/prompts/train.parquet",
+    model_arn=previous_model_arn,  # Train on top of previous fine-tune
+    config=ForgeConfig(output_s3_path="s3://bucket/output/"),
 )
 
-rft_infra.setup()
+iter_result = iterative_trainer.train(job_name="my-iterative-job")
 ```
 
-### Custom Starter Kit Path
+### Retrieving Model Artifacts
 
-You can provide a custom starter kit path instead of using the default AWS starter kit:
+Retrieve model artifacts from a completed MTRL job:
 
 ```python
-# LOCAL: Use local file path
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
+from amzn_nova_forge.util.sagemaker import get_model_artifacts
+
+artifacts = get_model_artifacts(
+    job_name="my-mtrl-job-id",
+    infra=runtime,
     region="us-east-1",
-    python_venv_name="my_rft_venv",
-    vf_env_id=VFEnvId.WORDLE,
-    starter_kit_path="~/my-custom-starter-kit"  # Local path
 )
 
-# EC2: Use local path (auto-uploaded to S3)
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    infrastructure_arn="i-1234567890abcdef0",
-    python_venv_name="my_rft_venv",
-    vf_env_id=VFEnvId.WORDLE,
-    starter_kit_path="/path/to/v1"  # Local path, will be uploaded to S3
-)
-
-# ECS: Use S3 URI directly
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    infrastructure_arn="arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster",
-    vf_env_id=VFEnvId.WORDLE,
-    starter_kit_path="s3://my-bucket/custom-starter-kits/v1.tar.gz"  # S3 URI
-)
+print(artifacts.output_model_arn)   # Model package ARN
+print(artifacts.output_s3_path)     # S3 output path (from job config)
 ```
 
-### Custom IAM Role
+For MTRL jobs, `output_s3_path` is not required as a parameter — it is fetched from the AgentRFT job's `OutputDataConfig`.
+
+### Serverless Evaluation
+
+The evaluator supports three modes for MTRL on Serverless SMTJ:
+
+#### Base Model Only
+
+Evaluates the base Nova model without any fine-tuning:
 
 ```python
-rft_infra = RFTMultiturnInfrastructure(
-    stack_name="my-rft-stack",
-    region="us-east-1",
-    python_venv_name="my_rft_venv",
-    vf_env_id=VFEnvId.WORDLE,
-    rft_role_name="MyCustomRFTRole",  # Custom role name
-    custom_policy_path="path/to/custom-policy.json"  # Custom policy JSON
+evaluator = ForgeEvaluator(
+    model=Model.NOVA_LITE_2,
+    infra=runtime,
+    data_s3_path="s3://bucket/prompts/eval.parquet",
+    config=ForgeConfig(output_s3_path="s3://bucket/eval-output/"),
+)
+
+eval_result = evaluator.evaluate(
+    job_name="eval-base-model",
+    eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
 )
 ```
+
+#### Fine-Tuned Model Only
+
+Evaluates a fine-tuned model from a Restricted Model Package (RMP):
+
+```python
+eval_result = evaluator.evaluate(
+    job_name="eval-finetuned",
+    eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+    model_path="arn:aws:sagemaker:us-east-1:123456789012:model-package/my-rmp/1",
+)
+```
+
+You can also pass a `job_result` from a completed training job to auto-resolve the model:
+
+```python
+eval_result = evaluator.evaluate(
+    job_name="eval-finetuned",
+    eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+    job_result=training_result,  # Auto-resolves model checkpoint
+)
+```
+
+#### Base + Fine-Tuned Comparison
+
+Evaluates both the base model and fine-tuned model in a single pipeline for side-by-side comparison:
+
+```python
+eval_result = evaluator.evaluate(
+    job_name="eval-comparison",
+    eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+    model_path="arn:aws:sagemaker:us-east-1:123456789012:model-package/my-rmp/1",
+    task_config=EvalTaskConfig(evaluate_base_model=True),
+)
+```
+
+This creates a pipeline with both `EvaluateBaseModel` and `EvaluateFineTunedModel` steps. Results are tracked in MLflow for comparison.
+
+#### Evaluation Overrides
+
+All modes support hyperparameter overrides:
+
+```python
+eval_result = evaluator.evaluate(
+    job_name="my-eval-job",
+    eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+    model_path=model_package_arn,
+    overrides={
+        "global_batch_size": 16,
+        "max_steps": 20,
+    },
+)
+
+print(f"Eval Job ID: {eval_result.job_id}")
+```
+
+### Save and Load Results
+
+```python
+# Save result to file
+result_path = result.dump()
+
+# Load in a new session
+from amzn_nova_forge.core.result import TrainingResult
+loaded_result = TrainingResult.load(result_path)
+
+# All operations work on loaded results
+status, raw = loaded_result.get_job_status()
+print(f"Output Model: {loaded_result.model_artifacts.output_model_arn}")
+```
+
+---
 
 ## Dataset Format
 
@@ -249,8 +317,6 @@ loader = CSVDatasetLoader(id="id", prompt="prompt", answer="answer", task="task"
 ```
 
 ### Dataset Validation
-
-The SDK automatically validates your dataset:
 
 ```python
 from amzn_nova_forge import JSONLDatasetLoader, TrainingMethod, Model, EvaluationTask
@@ -291,9 +357,220 @@ print(f"Dataset uploaded to: {s3_path}")
 - `info`: Optional, but if present in any sample, must be present in all samples
   - Must be a dict or valid JSON string
 
-## Training
+---
 
-### setup() Method
+## HyperPod MTRL
+
+HyperPod MTRL uses `RFTMultiturnInfrastructure` to deploy custom reward environments on LOCAL, EC2, or ECS, and trains on a SageMaker HyperPod cluster.
+
+### Overview
+
+RFT Multiturn enables you to fine-tune Nova models using reinforcement learning with custom reward functions. The infrastructure can be deployed on three platforms:
+
+- **LOCAL**: Runs on your local machine
+- **EC2**: Runs on an AWS EC2 instance
+- **ECS**: Runs on AWS ECS Fargate
+
+### HyperPod Prerequisites
+
+#### General Requirements
+
+- Python 3.12
+- AWS credentials configured
+- The SDK requires specific IAM permissions. See the [IAM Roles/Policies section in the main README](../README.md#iam-rolespolicies) for the complete list of required permissions.
+dditional SSM and ECS permissions are required - see the "If performing RFT Multiturn training" section in the README
+- SageMaker HyperPod cluster (for training)
+
+#### Platform-Specific Requirements
+
+##### For LOCAL Platform or SageMaker Notebook
+
+- Python 3.12 installed locally
+- Sufficient local compute resources
+
+##### For EC2 Platform
+
+Requirements:
+- EC2 instance launched with **Amazon Linux 2023** ([guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/LaunchingAndUsingInstances.html))
+- Recommended instance type: `r5.24xlarge` or similar
+- SSM access enabled on the instance
+- IAM permissions for SSM commands
+
+##### For ECS Platform
+
+- ECS cluster with Fargate ([guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-cluster-console-v2.html))
+- VPC with subnets and security groups configured
+- IAM permissions for ECS task management
+
+### HyperPod Quick Start
+
+```python
+from amzn_nova_forge import *
+
+# 1. Setup infrastructure (LOCAL example)
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    python_venv_name="my_rft_venv",
+    vf_env_id=VFEnvId.WORDLE  # Built-in environment
+)
+
+# Deploy infrastructure
+rft_infra.setup()
+
+# Start training environment
+rft_infra.start_environment(env_type=EnvType.TRAIN)
+
+# 2. Train model
+trainer = ForgeTrainer(
+    model=Model.NOVA_LITE_2,
+    method=TrainingMethod.RFT_MULTITURN_LORA,
+    infra=SMHPRuntimeManager(
+        cluster_name="my-cluster",
+        namespace="kubeflow",
+        instance_type="ml.p5.48xlarge",
+        instance_count=2
+    ),
+    training_data_s3_path="s3://bucket/data.jsonl",
+)
+
+training_result = trainer.train(
+    job_name="rft-training",
+    rft_multiturn_infra=rft_infra
+)
+
+# 3. Cleanup
+rft_infra.cleanup(delete_stack=True)
+```
+
+### Infrastructure Setup
+
+#### RFTMultiturnInfrastructure Constructor
+
+The `RFTMultiturnInfrastructure` class is the main entry point for managing RFT multiturn infrastructure.
+
+**Parameters:**
+
+- `stack_name` (str, required): CloudFormation stack name for Lambda/SQS/DynamoDB resources. Automatically appends `-NovaForgeSDK` suffix if not present.
+- `region` (str, required): AWS region for infrastructure deployment (e.g., `"us-east-1"`).
+- `infrastructure_arn` (str, optional, default: `None`): Platform identifier: EC2 instance ID/ARN or ECS cluster ARN. If `None`, uses LOCAL platform.
+- `python_venv_name` (str, conditional, default: `None`): Python virtual environment name. **Required for LOCAL and EC2**, optional for ECS.
+- `vf_env_id` (VFEnvId or str, optional, default: `None`): Built-in environment ID (e.g., `VFEnvId.WORDLE`). Mutually exclusive with `custom_env`.
+- `custom_env` (CustomEnvironment, optional, default: `None`): Custom environment object. Mutually exclusive with `vf_env_id`.
+- `starter_kit_path` (str, optional, default: `None`): Custom starter kit path. If not provided, uses default AWS starter kit.
+  - **LOCAL**: Local file path (e.g., `"~/my-starter-kit"` or `"/path/to/v1"`)
+  - **EC2/ECS**: Local path (auto-uploaded to S3) or S3 URI (e.g., `"s3://bucket/path/v1.tar.gz"`)
+- `rft_role_name` (str, optional, default: `"RFTExecutionRoleNovaSDK"`): IAM role name for RFT infrastructure permissions.
+- `custom_policy_path` (str, optional, default: `None`): Path to custom IAM policy JSON file. If not provided, uses SDK default policy.
+- `vpc_config` (dict, optional, default: uses cluster's default): **ECS only**: VPC configuration with `subnets` and `security_groups` keys.
+- `cpu` (str, optional, default: `"2048"`): **ECS only**: CPU units for Fargate task (e.g., `"4096"`).
+- `memory` (str, optional, default: `"4096"`): **ECS only**: Memory in MB for Fargate task (e.g., `"8192"`).
+
+#### Platform Detection
+
+The platform is automatically detected based on `infrastructure_arn`:
+- **LOCAL**: `infrastructure_arn` is `None`
+- **EC2**: `infrastructure_arn` which is ARN of EC2 instance or instance id starting with `i-`
+- **ECS**: `infrastructure_arn` which is ARN of ECS cluster
+
+#### LOCAL Platform
+
+```python
+from amzn_nova_forge import RFTMultiturnInfrastructure, VFEnvId
+
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    python_venv_name="my_rft_venv",  # Required for LOCAL
+    vf_env_id=VFEnvId.WORDLE
+)
+
+rft_infra.setup()
+```
+
+#### EC2 Platform
+
+```python
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    infrastructure_arn="i-1234567890abcdef0",  # EC2 instance ID or full ARN
+    python_venv_name="my_rft_venv",  # Required for EC2
+    vf_env_id=VFEnvId.WORDLE 
+)
+
+rft_infra.setup()
+```
+
+#### ECS Platform
+
+```python
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    infrastructure_arn="arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster",
+    vf_env_id=VFEnvId.WORDLE,
+    vpc_config={
+        "subnets": ["subnet-12345", "subnet-67890"],
+        "security_groups": ["sg-12345"]
+    },  # Optional, uses cluster defaults if not provided
+    cpu="4096",      # Optional, defaults to "2048"
+    memory="8192"    # Optional, defaults to "4096"
+)
+
+rft_infra.setup()
+```
+
+#### Custom Starter Kit Path
+
+You can provide a custom starter kit path instead of using the default AWS starter kit:
+
+```python
+# LOCAL: Use local file path
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    python_venv_name="my_rft_venv",
+    vf_env_id=VFEnvId.WORDLE,
+    starter_kit_path="~/my-custom-starter-kit"  # Local path
+)
+
+# EC2: Use local path (auto-uploaded to S3)
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    infrastructure_arn="i-1234567890abcdef0",
+    python_venv_name="my_rft_venv",
+    vf_env_id=VFEnvId.WORDLE,
+    starter_kit_path="/path/to/v1"  # Local path, will be uploaded to S3
+)
+
+# ECS: Use S3 URI directly
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    infrastructure_arn="arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster",
+    vf_env_id=VFEnvId.WORDLE,
+    starter_kit_path="s3://my-bucket/custom-starter-kits/v1.tar.gz"  # S3 URI
+)
+```
+
+#### Custom IAM Role
+
+```python
+rft_infra = RFTMultiturnInfrastructure(
+    stack_name="my-rft-stack",
+    region="us-east-1",
+    python_venv_name="my_rft_venv",
+    vf_env_id=VFEnvId.WORDLE,
+    rft_role_name="MyCustomRFTRole",  # Custom role name
+    custom_policy_path="path/to/custom-policy.json"  # Custom policy JSON
+)
+```
+
+### HyperPod Training
+
+#### setup() Method
 
 Deploys the SAM stack and validates platform requirements.
 
@@ -320,7 +597,7 @@ This method takes no parameters.
 rft_infra.setup()
 ```
 
-### start_environment() Method
+#### start_environment() Method
 
 Starts the training or evaluation environment on the configured platform using the unified environment client.
 
@@ -369,7 +646,7 @@ rft_infra.start_environment(
 
 ```
 
-### start_training_environment() Method (DEPRECATED)
+#### start_training_environment() Method (DEPRECATED)
 
 **DEPRECATED**: This method is deprecated and will be removed in a future version. Use `start_environment(env_type=EnvType.TRAIN, ...)` instead.
 
@@ -395,7 +672,7 @@ rft_infra.start_environment(
 )
 ```
 
-### start_evaluation_environment() Method (DEPRECATED)
+#### start_evaluation_environment() Method (DEPRECATED)
 
 **DEPRECATED**: This method is deprecated and will be removed in a future version. Use `start_environment(env_type=EnvType.EVAL, ...)` instead.
 
@@ -421,7 +698,7 @@ rft_infra.start_environment(
 )
 ```
 
-### get_recipe_overrides() Method
+#### get_recipe_overrides() Method
 
 Gets recipe parameter overrides for RFT multiturn training jobs.
 
@@ -445,7 +722,7 @@ overrides = rft_infra.get_recipe_overrides()
 print(f"Lambda ARN: {overrides['rollout_request_arn']}")
 ```
 
-### Train with ForgeTrainer
+#### Train with ForgeTrainer
 
 Use the `train()` method of `ForgeTrainer` with the `rft_multiturn_infra` parameter.
 
@@ -489,9 +766,9 @@ training_result.wait()
 checkpoint_path = training_result.model_artifacts.checkpoint_s3_path
 ```
 
-## Evaluation
+### HyperPod Evaluation
 
-### Starting Evaluation Environment
+#### Starting Evaluation Environment
 
 Use the `start_environment()` method with `env_type=EnvType.EVAL` to start the evaluation environment.
 
@@ -524,11 +801,11 @@ rft_infra.start_environment(
 )
 ```
 
-### start_evaluation_environment() Method (DEPRECATED)
+#### start_evaluation_environment() Method (DEPRECATED)
 
 **DEPRECATED**: Use `start_environment(env_type=EnvType.EVAL, ...)` instead. See the [start_environment() documentation](#start_environment-method) for details.
 
-### Evaluate with ForgeEvaluator
+#### Evaluate with ForgeEvaluator
 
 Use the `evaluate()` method of `ForgeEvaluator` with the `rft_multiturn_infra` parameter.
 
@@ -569,13 +846,13 @@ eval_result.wait()
 eval_result.show()
 ```
 
-## Monitoring
+### HyperPod Monitoring
 
-### Session Persistence
+#### Session Persistence
 
 The SDK provides `dump()` and `load()` methods to save and restore infrastructure state across sessions (e.g., after notebook restarts).
 
-#### dump() Method
+##### dump() Method
 
 Saves infrastructure state to a JSON file for session recovery.
 
@@ -608,7 +885,7 @@ state_file = rft_infra.dump(
 # Saves as: my_state.json
 ```
 
-#### load() Method (Class Method)
+##### load() Method (Class Method)
 
 Loads infrastructure state from a file and reconnects to running processes.
 
@@ -645,7 +922,7 @@ logs = rft_infra.get_logs(env_type=EnvType.TRAIN, limit=50)
 - Resume monitoring after disconnection
 - Debug issues by loading historical states
 
-### get_logs() Method
+#### get_logs() Method
 
 Retrieves logs from training, evaluation, or SAM deployment environments.
 
@@ -697,7 +974,7 @@ logs = rft_infra.get_logs(
 )
 ```
 
-### check_all_queues() Method
+#### check_all_queues() Method
 
 Checks message counts in all SQS queues.
 
@@ -721,7 +998,7 @@ for queue_name, counts in queue_status.items():
     print(f"  Last modified: {counts.last_receive_timestamp}")
 ```
 
-### flush_all_queues() Method
+#### flush_all_queues() Method
 
 Purges all messages from all SQS queues.
 
@@ -746,7 +1023,7 @@ This method takes no parameters.
 rft_infra.flush_all_queues()
 ```
 
-### get_configuration() Method
+#### get_configuration() Method
 
 Gets complete infrastructure configuration.
 
@@ -775,9 +1052,9 @@ print(f"Region: {config['region']}")
 print(f"Platform: {config['platform']}")
 ```
 
-## Custom Environments
+### Custom Environments
 
-### CustomEnvironment Class
+#### CustomEnvironment Class
 
 The `CustomEnvironment` class allows you to create and package custom reward environments.
 
@@ -865,7 +1142,7 @@ s3_uri = custom_env.package_and_upload(
 print(f"Uploaded to: {s3_uri}")
 ```
 
-### Create Custom Environment
+#### Create Custom Environment
 
 ```python
 from amzn_nova_forge import CustomEnvironment
@@ -886,7 +1163,7 @@ s3_uri = custom_env.package_and_upload()
 print(f"Environment uploaded to: {s3_uri}")
 ```
 
-### Use Custom Environment
+#### Use Custom Environment
 
 ```python
 # For LOCAL platform
@@ -908,11 +1185,11 @@ rft_infra = RFTMultiturnInfrastructure(
 )
 ```
 
-### Built-in Environments
+#### Built-in Environments
 
 The SDK provides two built-in environments via the `VFEnvId` enum:
 
-#### VFEnvId.WORDLE
+##### VFEnvId.WORDLE
 
 A Wordle game environment for word-guessing tasks.
 
@@ -938,7 +1215,7 @@ rft_infra.start_environment(
 )
 ```
 
-#### VFEnvId.TERMINAL_BENCH
+##### VFEnvId.TERMINAL_BENCH
 
 A terminal benchmark environment for command-line tasks.
 
@@ -961,9 +1238,9 @@ rft_infra.start_environment(
 )
 ```
 
-## Helper Functions
+### Helper Functions
 
-### create_rft_execution_role()
+#### create_rft_execution_role()
 
 Creates an IAM role with required permissions for RFT multiturn infrastructure.
 
@@ -1025,7 +1302,7 @@ rft_infra = RFTMultiturnInfrastructure(
 )
 ```
 
-### list_rft_stacks()
+#### list_rft_stacks()
 
 Lists CloudFormation stacks related to RFT multiturn infrastructure.
 
@@ -1054,9 +1331,9 @@ all_stacks = list_rft_stacks(region="us-east-1", all_stacks=True)
 print(f"Found {len(all_stacks)} total stacks")
 ```
 
-## Cleanup
+### Cleanup
 
-### kill_task() Method
+#### kill_task() Method
 
 Stops a running training or evaluation task.
 
@@ -1086,7 +1363,7 @@ rft_infra.kill_task(env_type=EnvType.TRAIN)
 rft_infra.kill_task(env_type=EnvType.EVAL)
 ```
 
-### cleanup() Method
+#### cleanup() Method
 
 Cleans up infrastructure resources.
 
@@ -1143,6 +1420,8 @@ rft_infra.cleanup(delete_stack=True)  # cleanup_environment defaults to False
 - Environment cleanup is irreversible - you'll need to run `setup()` again
 - Use `delete_stack=False` if you plan to reuse the stack for another training/evaluation run
 
+---
+
 ## Platform Support
 
 ### Supported Models
@@ -1157,19 +1436,21 @@ rft_infra.cleanup(delete_stack=True)  # cleanup_environment defaults to False
 
 ### Supported Platforms
 
-- **Training**: SageMaker HyperPod (SMHP) only
-- **Infrastructure**: LOCAL, EC2, or ECS
+| Platform   | Runtime Manager                | Agent Environment           | Infrastructure Required        |
+|------------|--------------------------------|-----------------------------|--------------------------------|
+| Serverless | `SMTJServerlessRuntimeManager` | Bedrock AgentCore or Lambda | None                           |
+| HyperPod  | `SMHPRuntimeManager`           | LOCAL / EC2 / ECS           | `RFTMultiturnInfrastructure`   |
 
-### Platform Comparison
+### HyperPod Infrastructure Comparison
 
-| Feature           | LOCAL    | EC2      | ECS                                          |
-|-------------------|----------|----------|----------------------------------------------|
-| Setup Complexity  | Low      | Medium   | Medium with default network configs else High|
-| Scalability       | Limited  | Medium   | High                                         |
-| Cost              | Low      | Medium   | Medium-High                                  |
-| python_venv_name  | Required | Required | Optional                                     |
-| VPC Config        | N/A      | N/A      | Required                                     |
-| CPU/Memory Config | N/A      | N/A      | Optional                                     |
+| Feature          | LOCAL    | EC2      | ECS                                           |
+|------------------|----------|----------|-----------------------------------------------|
+| Setup Complexity | Low      | Medium   | Medium with default network configs else High |
+| Scalability      | Limited  | Medium   | High                                          |
+| Cost             | Low      | Medium   | Medium-High                                   |
+| python_venv_name | Required | Required | Optional                                      |
+| VPC Config       | N/A      | N/A      | Required                                      |
+| CPU/Memory Config| N/A      | N/A      | Optional                                      |
 
 ## Examples
 
@@ -1309,4 +1590,5 @@ get_logs(env_type=EnvType.TRAIN, tail=True)
 - [Main SDK Documentation](../README.md) - Complete SDK overview and getting started guide
 - [API Specification](../spec/index.md) - Detailed API documentation for all modules
 - [Quick Start Notebook](../samples/nova_quickstart.ipynb) - General Nova customization examples
-- [RFT Multiturn Notebook](../samples/rft_multiturn_quickstart.ipynb) - RFT multiturn specific examples
+- [RFT Multiturn Notebook](../samples/rft_multiturn_quickstart.ipynb) - RFT multiturn specific examples (HyperPod)
+- [Serverless MTRL Notebook](../samples/rft_multiturn_serverless_quickstart.ipynb) - Serverless MTRL examples

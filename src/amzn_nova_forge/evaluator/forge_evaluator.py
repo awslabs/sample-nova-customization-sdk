@@ -37,6 +37,7 @@ from amzn_nova_forge.core.result import (
     EvaluationResult,
     SMHPEvaluationResult,
     SMTJEvaluationResult,
+    SMTJTrainingResult,
     TrainingResult,
 )
 from amzn_nova_forge.core.runtime import RuntimeManager
@@ -46,7 +47,7 @@ from amzn_nova_forge.core.types import (
     validate_region,
 )
 from amzn_nova_forge.evaluator.inspect_lens_config import InspectLensConfig
-from amzn_nova_forge.manager.runtime_manager import SMHPRuntimeManager
+from amzn_nova_forge.manager.runtime_manager import SMHPRuntimeManager, SMTJServerlessRuntimeManager
 from amzn_nova_forge.model.nova_model_customizer_util import (
     requires_custom_eval_data,
     resolve_model_checkpoint_path,
@@ -70,12 +71,24 @@ if TYPE_CHECKING:
 
 @dataclass
 class EvalTaskConfig:
-    """Per-task configuration for an evaluation job."""
+    """Per-task configuration for an evaluation job.
+
+    Attributes:
+        subtask: Subtask identifier for benchmark evaluations.
+        processor: Lambda processor config for BYOM evaluations.
+        rl_env: RL environment config for HyperPod evaluations.
+        override_data_s3_path: Override the default evaluation dataset path.
+        evaluate_base_model: When True and used with RFT_MULTITURN_EVAL,
+            evaluates both the base model and the fine-tuned model in a
+            single pipeline for side-by-side comparison. Only applies to
+            MTRL evaluation on SMTJServerless. Requires model_path to be set.
+    """
 
     subtask: Optional[str] = None
     processor: Optional[Dict[str, Any]] = None
     rl_env: Optional[Dict[str, Any]] = None
     override_data_s3_path: Optional[str] = None
+    evaluate_base_model: bool = False
 
 
 class ForgeEvaluator:
@@ -222,6 +235,24 @@ class ForgeEvaluator:
                 "Use SageMaker platforms (SMTJ, SMHP) instead."
             )
 
+        # MTRL evaluation on SMTJServerless delegates to the MultiTurnRLEvaluator
+        if (
+            eval_task == EvaluationTask.RFT_MULTITURN_EVAL
+            and self._platform == Platform.SMTJServerless
+        ):
+            evaluate_base_model = False
+            if task_config and hasattr(task_config, "evaluate_base_model"):
+                evaluate_base_model = task_config.evaluate_base_model
+            return self._execute_mtrl_eval(
+                job_name=job_name,
+                model_path=model_path,
+                job_result=job_result,
+                task_config=task_config,
+                overrides=overrides,
+                dry_run=dry_run,
+                evaluate_base_model=evaluate_base_model,
+            )
+
         # Check job cache
         cached = load_existing_result(
             self._cache_context,
@@ -354,6 +385,7 @@ class ForgeEvaluator:
                 recipe_path=resolved_recipe_path,
                 input_s3_data_type="S3Prefix",
                 method=TrainingMethod.EVALUATION,
+                model_name_or_path=resolved_model_path,
             )
         )
 
@@ -774,6 +806,88 @@ class ForgeEvaluator:
         )
         logger.info(f"Uploaded InspectLens config to s3://{bucket}/{key}")
 
+    def _execute_mtrl_eval(
+        self,
+        job_name: str,
+        model_path: Optional[str] = None,
+        job_result: Optional[TrainingResult] = None,
+        task_config: Optional[EvalTaskConfig] = None,
+        overrides: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False,
+        evaluate_base_model: bool = False,
+    ) -> Optional[EvaluationResult]:
+        """Delegate MTRL evaluation to the MultiTurnRLEvaluator.
+
+        This is called when eval_task is RFT_MULTITURN_EVAL on the
+        SMTJServerless platform. It uses the sagemaker.train.evaluate
+        MultiTurnRLEvaluator which creates a SageMaker Pipeline with
+        the AgentRFTEvaluation job type.
+        """
+        infra = cast(SMTJServerlessRuntimeManager, self.infra)
+
+        # Resolve model path from job_result if not explicitly provided
+        resolved_model_path = model_path
+        if resolved_model_path is None and job_result is not None:
+            # For MTRL, use the model package ARN directly
+
+            if isinstance(job_result, SMTJTrainingResult) and job_result._is_mtrl:
+                resolved_model_path = job_result.model_artifacts.output_model_arn
+            else:
+                resolved_model_path = resolve_model_checkpoint_path(
+                    model_path=None,
+                    job_result=job_result,
+                    customizer_job_id=None,
+                    customizer_output_s3_path=self.output_s3_path,
+                    customizer_model_path=None,
+                )
+
+        # Resolve MLflow tracking URI (required for AgentRFT evaluation jobs)
+        if not self._config.mlflow_monitor or not self._config.mlflow_monitor.tracking_uri:
+            raise ValueError(
+                "MLflow configuration is required for AgentRFT evaluation jobs. "
+                "Please provide an mlflow_monitor with a valid tracking_uri when "
+                "using RFT_MULTITURN_EVAL on the SMTJServerless platform."
+            )
+        mlflow_uri = self._config.mlflow_monitor.tracking_uri
+
+        if dry_run:
+            logger.info(
+                f"[dry_run] Would launch MTRL evaluation '{job_name}' "
+                f"with model_path={resolved_model_path}"
+            )
+            return None
+
+        # Pass training job name so the evaluator can attach and resolve model artifacts
+        training_job_name = job_result.job_id if job_result is not None else None
+
+        execution = infra.execute_mtrl_eval(
+            model=self.model,
+            data_s3_path=self.data_s3_path,
+            output_s3_path=self.output_s3_path,
+            mlflow_tracking_uri=mlflow_uri,
+            model_path=resolved_model_path,
+            overrides=overrides,
+            training_job_name=training_job_name,
+            evaluate_base_model=evaluate_base_model,
+        )
+
+        start_time = datetime.now(timezone.utc)
+        eval_output_s3_path = f"{self.output_s3_path.rstrip('/')}/{job_name}/"
+
+        evaluation_result = SMTJEvaluationResult(
+            job_id=execution.arn,
+            eval_task=EvaluationTask.RFT_MULTITURN_EVAL,
+            started_time=start_time,
+            eval_output_path=eval_output_s3_path,
+            region=self.region,
+        )
+        evaluation_result._job_name = job_name  # type: ignore[attr-defined]
+        # Attach the execution object for downstream access (wait, show_results, etc.)
+        evaluation_result._mtrl_execution = execution  # type: ignore[attr-defined]
+
+        logger.info(f"Started MTRL evaluation pipeline. Execution ARN: {execution.arn}")
+        return evaluation_result
+
     @_telemetry_emitter(Feature.EVAL, "get_logs")
     def get_logs(
         self,
@@ -797,6 +911,23 @@ class ForgeEvaluator:
             raise ValueError(
                 "No job reference provided. Pass either a job_result or explicit job_id and started_time."
             )
+
+        is_mtrl_eval = (
+            job_result
+            and hasattr(job_result, "eval_task")
+            and job_result.eval_task == EvaluationTask.RFT_MULTITURN_EVAL
+        )
+
+        if is_mtrl_eval:
+            from amzn_nova_forge.monitor import MTRLLogMonitor
+
+            monitor = MTRLLogMonitor.from_job_id(
+                job_id=resolved_job_id,
+                region=self.region,
+                job_category="AgentRFTEvaluation",
+            )
+            monitor.show_logs(limit=limit)
+            return
 
         kwargs: Dict[str, Any] = {}
         if self._platform == Platform.SMHP:

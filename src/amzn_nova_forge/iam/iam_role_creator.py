@@ -163,7 +163,7 @@ def create_bedrock_execution_role(
         policies["s3_read_policy"]["Statement"][0]["Resource"] = "*"
 
     # Create and attach policies
-    for policy_name in ["bedrock_policy", "s3_read_policy"]:
+    for policy_name in ["bedrock_policy", "s3_read_policy", "sagemaker_model_package_policy"]:
         try:
             policy_arn = iam_client.create_policy(
                 PolicyName=f"{role_name}{policy_name.title()}",
@@ -293,6 +293,7 @@ def create_sagemaker_execution_role(
         "s3_read_policy",
         "kms_policy",
         "ec2_policy",
+        "sagemaker_model_package_policy",
     ]:
         try:
             logger.info(f"{json.dumps(policies[policy_name])}.")

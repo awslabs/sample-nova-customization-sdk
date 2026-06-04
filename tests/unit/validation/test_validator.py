@@ -2849,6 +2849,125 @@ class TestValidatorNoneTypeHandling(unittest.TestCase):
         self.assertIn("NoneType", errors[0])
 
 
+class TestMTRLServerlessValidation(unittest.TestCase):
+    """Tests for MTRL serverless validation logic in Validator._validate_recipe."""
+
+    def setUp(self):
+        self.mock_infra = Mock(spec=SMTJRuntimeManager)
+        self.mock_infra.instance_type = "ml.p5.48xlarge"
+        self.mock_infra.region = "us-east-1"
+
+    def test_mtrl_serverless_skips_override_constraint_validation(self):
+        """MTRL serverless jobs skip min/max/enum/type validation for most keys."""
+        recipe = {
+            "training_config": {
+                "global_batch_size": 2,  # Would fail min=16 constraint for single-turn RFT
+                "max_steps": 5,
+            },
+            "run": {
+                "output_s3_path": "s3://bucket/output/",
+                "data_s3_path": "s3://bucket/data/",
+            },
+        }
+        overrides_template = {
+            "global_batch_size": {"type": "integer", "min": 16, "max": 256},
+            "max_steps": {"type": "integer", "min": 10, "max": 100000},
+            "output_s3_path": {"type": "string", "required": True},
+            "data_s3_path": {"type": "string", "required": True},
+        }
+
+        errors = []
+        Validator._validate_recipe(
+            recipe=recipe,
+            overrides_template=overrides_template,
+            instance_type=None,
+            errors=errors,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            platform=Platform.SMTJServerless,
+        )
+
+        # Should have NO errors because MTRL serverless skips constraint validation
+        self.assertEqual(len(errors), 0)
+
+    def test_non_mtrl_serverless_still_validates_constraints(self):
+        """Non-MTRL methods on SMTJServerless should still validate constraints."""
+        recipe = {"training_config": {"max_steps": 2}}
+        overrides_template = {"max_steps": {"type": "integer", "min": 4}}
+
+        errors = []
+        Validator._validate_recipe(
+            recipe=recipe,
+            overrides_template=overrides_template,
+            instance_type=None,
+            errors=errors,
+            method=TrainingMethod.SFT_LORA,
+            platform=Platform.SMTJServerless,
+        )
+
+        # Should have error because SFT_LORA still validates
+        self.assertEqual(len(errors), 1)
+        self.assertIn("must be at least 4", errors[0])
+
+    def test_mtrl_serverless_still_validates_output_s3_path(self):
+        """MTRL serverless should still validate output_s3_path, data_s3_path, model_type."""
+        recipe = {"run": {"output_s3_path": 12345}}  # Wrong type for output_s3_path
+        overrides_template = {
+            "output_s3_path": {"type": "string", "required": True},
+        }
+
+        errors = []
+        Validator._validate_recipe(
+            recipe=recipe,
+            overrides_template=overrides_template,
+            instance_type=None,
+            errors=errors,
+            method=TrainingMethod.RFT_MULTITURN_LORA,
+            platform=Platform.SMTJServerless,
+        )
+
+        # output_s3_path is NOT skipped, so type validation should still catch this
+        self.assertEqual(len(errors), 1)
+        self.assertIn("output_s3_path", errors[0])
+
+    @patch("amzn_nova_forge.validation.validator.boto3.client")
+    def test_mtrl_serverless_accepts_agent_core_arn_no_lambda_required(self, mock_boto3_client):
+        """RFT_MULTITURN_LORA on SMTJServerless does not require rft_lambda_arn."""
+        mock_infra = Mock(spec=SMTJRuntimeManager)
+        mock_infra.instance_type = None
+        mock_infra.region = "us-east-1"
+
+        # Should NOT raise — MTRL on SMTJServerless uses agent_core_arn, no lambda required
+        try:
+            Validator.validate(
+                platform=Platform.SMTJServerless,
+                method=TrainingMethod.RFT_MULTITURN_LORA,
+                infra=mock_infra,
+                recipe={},
+                overrides_template={},
+                validation_config=ValidationConfig(iam=False, infra=False, recipe=False),
+            )
+        except ValueError as e:
+            self.fail(f"MTRL serverless validation should not require lambda ARN, but raised: {e}")
+
+    @patch("amzn_nova_forge.validation.validator.boto3.client")
+    def test_non_mtrl_method_does_not_skip_validation(self, mock_boto3_client):
+        """Non-MTRL methods on serverless do NOT get the _is_mtrl_serverless skip."""
+        mock_infra = Mock(spec=SMTJRuntimeManager)
+        mock_infra.instance_type = "ml.p5.48xlarge"
+        mock_infra.region = "us-east-1"
+
+        # SFT_LORA on serverless should still validate normally (no skip)
+        # This should not raise because recipe={} with no overrides is valid
+        Validator.validate(
+            platform=Platform.SMTJServerless,
+            method=TrainingMethod.SFT_LORA,
+            infra=mock_infra,
+            recipe={},
+            overrides_template={},
+            validation_config=ValidationConfig(iam=False, infra=False, recipe=False),
+        )
+
+
 class TestValidationDataS3Path(unittest.TestCase):
     """Tests for validation_data_s3_path preflight validation."""
 

@@ -24,6 +24,7 @@ from typing import Any, Callable, ClassVar, Dict, Optional
 
 import boto3
 
+from amzn_nova_forge.core.constants import MTRL_PIPELINE_EXECUTION_RE
 from amzn_nova_forge.core.enums import Platform
 from amzn_nova_forge.core.validation_patterns import (
     validate_cluster_name,
@@ -229,6 +230,88 @@ class SMHPStatusManager(JobStatusManager):
         raise ValueError(f"Cannot resolve start time for SMHP job {job_id}")
 
 
+class MTRLStatusManager(JobStatusManager):
+    """Status manager for MTRL jobs (training via AgentRFT Job API, eval via Pipeline Execution)."""
+
+    def __init__(self, region: Optional[str] = None):
+        super().__init__()
+        self._region = region
+        self._session = boto3.Session(region_name=region) if region else None
+
+    def _is_pipeline_execution(self, job_id: str) -> bool:
+        return bool(MTRL_PIPELINE_EXECUTION_RE.match(job_id))
+
+    def _get_pipeline_client(self, job_id: str):
+        region = job_id.split(":")[3] if ":sagemaker:" in job_id else self._region
+        return boto3.client("sagemaker", region_name=region)
+
+    def get_job_status(self, job_id: str) -> tuple[JobStatus, str]:
+        if self._job_status == JobStatus.COMPLETED or self._job_status == JobStatus.FAILED:
+            return self._job_status, self._raw_status
+
+        if self._is_pipeline_execution(job_id):
+            return self._get_pipeline_status(job_id)
+        return self._get_job_status(job_id)
+
+    def _get_job_status(self, job_id: str) -> tuple[JobStatus, str]:
+        from sagemaker.train.agent_rft_job import AgentRFTJob
+
+        rft_job = AgentRFTJob.get(job_id, session=self._session)
+        raw_status = rft_job.job_status
+
+        status_mapping = {
+            "InProgress": JobStatus.IN_PROGRESS,
+            "Completed": JobStatus.COMPLETED,
+            "Failed": JobStatus.FAILED,
+            "Stopping": JobStatus.FAILED,
+            "Stopped": JobStatus.FAILED,
+        }
+        job_status = status_mapping.get(raw_status, JobStatus.IN_PROGRESS)
+
+        self._job_status = job_status
+        self._raw_status = raw_status
+        return job_status, raw_status
+
+    def _get_pipeline_status(self, job_id: str) -> tuple[JobStatus, str]:
+        client = self._get_pipeline_client(job_id)
+        resp = client.describe_pipeline_execution(PipelineExecutionArn=job_id)
+        raw_status = resp["PipelineExecutionStatus"]
+
+        status_mapping = {
+            "Executing": JobStatus.IN_PROGRESS,
+            "Starting": JobStatus.IN_PROGRESS,
+            "Succeeded": JobStatus.COMPLETED,
+            "Failed": JobStatus.FAILED,
+            "Stopping": JobStatus.FAILED,
+            "Stopped": JobStatus.FAILED,
+        }
+        job_status = status_mapping.get(raw_status, JobStatus.IN_PROGRESS)
+
+        self._job_status = job_status
+        self._raw_status = raw_status
+        return job_status, raw_status
+
+    def resolve_start_time(self, job_id: str) -> datetime:
+        if self._is_pipeline_execution(job_id):
+            client = self._get_pipeline_client(job_id)
+            resp = client.describe_pipeline_execution(PipelineExecutionArn=job_id)
+            start_time = resp.get("CreationTime")
+            if start_time:
+                return (
+                    start_time
+                    if isinstance(start_time, datetime)
+                    else datetime.fromisoformat(str(start_time))
+                )
+            raise ValueError(f"Cannot resolve start time for MTRL eval pipeline {job_id}")
+
+        from sagemaker.train.agent_rft_job import AgentRFTJob
+
+        rft_job = AgentRFTJob.get(job_id, session=self._session)
+        if rft_job.creation_time:
+            return rft_job.creation_time
+        raise ValueError(f"Cannot resolve start time for MTRL job {job_id}")
+
+
 class BedrockStatusManager(JobStatusManager):
     # Injected by util/bedrock.py at import time so core/ has zero internal imports.
     _get_job_details: Optional[Callable] = None
@@ -333,9 +416,13 @@ class BaseJobResult(ABC):
             Platform.SMTJ
             if isinstance(self._status_manager, SMTJStatusManager)
             else (
-                Platform.BEDROCK
-                if isinstance(self._status_manager, BedrockStatusManager)
-                else Platform.SMHP
+                Platform.SMTJServerless
+                if isinstance(self._status_manager, MTRLStatusManager)
+                else (
+                    Platform.BEDROCK
+                    if isinstance(self._status_manager, BedrockStatusManager)
+                    else Platform.SMHP
+                )
             )
         )
 
@@ -494,7 +581,15 @@ class BaseJobResult(ABC):
         :param file_name: The file name of the result. Default to <job_id>_<platform>.json if not provided
         :return: The full result file path
         """
-        file_name = file_name or f"{self.job_id}_{self._platform.value}.json"
+        if not file_name:
+            # MTRL Pipeline execution ARNs contain "/" which is invalid in filenames
+            if "/" in self.job_id:
+                exec_id = self.job_id.rsplit("/", 1)[-1]
+                job_name = getattr(self, "_job_name", None)
+                name = f"{job_name}-{exec_id}" if job_name else exec_id
+            else:
+                name = self.job_id
+            file_name = f"{name}_{self._platform.value}.json"
 
         if file_path is None:
             full_path = Path(file_name)
