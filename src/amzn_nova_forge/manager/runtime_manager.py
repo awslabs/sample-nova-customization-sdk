@@ -54,6 +54,7 @@ from amzn_nova_forge.core.types import JobConfig
 from amzn_nova_forge.core.validation_patterns import MODEL_PACKAGE_ARN_REGEX
 from amzn_nova_forge.manager.mtrl_manager import MTRLOperations
 from amzn_nova_forge.telemetry import Feature, _telemetry_emitter
+from amzn_nova_forge.util.aws_utils import get_caller_account_id
 from amzn_nova_forge.util.bedrock import (
     get_customization_type,
     parse_bedrock_recipe_config,
@@ -157,32 +158,6 @@ class DataPrepJobConfig(JobConfig):
     text_field: str = "text"
     extra_args: Dict[str, Any] = field(default_factory=dict)
     extra_pip_packages: List[str] = field(default_factory=list)
-
-
-_account_id_cache: Optional[str] = None
-
-
-def _get_caller_account_id(region: str = "us-east-1") -> str:
-    """Return the AWS account ID of the caller, cached to avoid redundant STS calls.
-
-    Only caches successful results — transient STS failures return "*" without poisoning
-    the cache, so subsequent calls will retry.
-    """
-    global _account_id_cache
-    if _account_id_cache is None:
-        try:
-            _account_id_cache = boto3.client("sts", region_name=region).get_caller_identity()[
-                "Account"
-            ]
-        except Exception:
-            logger.warning(
-                "Failed to retrieve caller account ID via STS in region %s; "
-                "falling back to wildcard '*'",
-                region,
-                exc_info=True,
-            )
-            return "*"
-    return _account_id_cache
 
 
 def _poll_for_training_job(sagemaker_client, job_name: str, timeout: int) -> str:
@@ -628,9 +603,24 @@ class SMTJRuntimeManager(RuntimeManager):
         # Add SMTJ-specific permissions
         permissions.extend(
             [
-                ("sagemaker:CreateTrainingJob", "*"),
-                ("sagemaker:DescribeTrainingJob", "*"),
-                ("sagemaker:StopTrainingJob", "*"),
+                (
+                    "sagemaker:CreateTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
+                (
+                    "sagemaker:DescribeTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
+                (
+                    "sagemaker:StopTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
                 "iam:GetRole",
                 "iam:PassRole",
                 "iam:GetPolicy",
@@ -1518,11 +1508,32 @@ class SMTJDataPrepRuntimeManager(RuntimeManager):
 
         permissions.extend(
             [
-                ("sagemaker:CreateTrainingJob", "*"),
-                ("sagemaker:DescribeTrainingJob", "*"),
-                ("sagemaker:StopTrainingJob", "*"),
-                ("iam:GetRole", "*"),
-                ("iam:PassRole", "*"),
+                (
+                    "sagemaker:CreateTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
+                (
+                    "sagemaker:DescribeTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
+                (
+                    "sagemaker:StopTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
+                (
+                    "iam:GetRole",
+                    lambda infra: f"arn:aws:iam::{get_caller_account_id(infra.region)}:role/*",
+                ),
+                (
+                    "iam:PassRole",
+                    lambda infra: f"arn:aws:iam::{get_caller_account_id(infra.region)}:role/*",
+                ),
                 # Artifact bucket: auto-create, check existence, upload script + .whl
                 ("s3:CreateBucket", "*"),
                 ("s3:HeadBucket", "*"),
@@ -1567,19 +1578,19 @@ class SMHPRuntimeManager(RuntimeManager):
                 (
                     "sagemaker:DescribeCluster",
                     lambda infra: (
-                        f"arn:aws:sagemaker:{infra.region}:{_get_caller_account_id(infra.region)}:cluster/{infra.cluster_name}"
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:cluster/{infra.cluster_name}"
                     ),
                 ),
                 (
                     "eks:DescribeCluster",
                     lambda infra: (
-                        f"arn:aws:eks:{infra.region}:{_get_caller_account_id(infra.region)}:cluster/*"
+                        f"arn:aws:eks:{infra.region}:{get_caller_account_id(infra.region)}:cluster/*"
                     ),
                 ),
                 (
                     "eks:ListAddons",
                     lambda infra: (
-                        f"arn:aws:eks:{infra.region}:{_get_caller_account_id(infra.region)}:cluster/{infra.cluster_name}"
+                        f"arn:aws:eks:{infra.region}:{get_caller_account_id(infra.region)}:cluster/{infra.cluster_name}"
                     ),
                 ),
                 ("sagemaker:ListClusters", "*"),
@@ -2155,9 +2166,24 @@ class BedrockRuntimeManager(RuntimeManager):
         # Add Bedrock-specific permissions
         permissions.extend(
             [
-                ("bedrock:CreateModelCustomizationJob", "*"),
-                ("bedrock:StopModelCustomizationJob", "*"),
-                ("bedrock:GetModelCustomizationJob", "*"),
+                (
+                    "bedrock:CreateModelCustomizationJob",
+                    lambda infra: (
+                        f"arn:aws:bedrock:{infra.region}:{get_caller_account_id(infra.region)}:model-customization-job/*"
+                    ),
+                ),
+                (
+                    "bedrock:StopModelCustomizationJob",
+                    lambda infra: (
+                        f"arn:aws:bedrock:{infra.region}:{get_caller_account_id(infra.region)}:model-customization-job/*"
+                    ),
+                ),
+                (
+                    "bedrock:GetModelCustomizationJob",
+                    lambda infra: (
+                        f"arn:aws:bedrock:{infra.region}:{get_caller_account_id(infra.region)}:model-customization-job/*"
+                    ),
+                ),
                 "iam:PassRole",
             ]
         )
@@ -2205,8 +2231,18 @@ class SMTJServerlessRuntimeManager(MTRLOperations, RuntimeManager):
         # Add SMTJ-specific permissions
         permissions.extend(
             [
-                ("sagemaker:CreateTrainingJob", "*"),
-                ("sagemaker:DescribeTrainingJob", "*"),
+                (
+                    "sagemaker:CreateTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
+                (
+                    "sagemaker:DescribeTrainingJob",
+                    lambda infra: (
+                        f"arn:aws:sagemaker:{infra.region}:{get_caller_account_id(infra.region)}:training-job/*"
+                    ),
+                ),
                 "iam:GetRole",
                 "iam:PassRole",
                 "iam:GetPolicy",

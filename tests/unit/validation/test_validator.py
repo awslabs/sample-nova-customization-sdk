@@ -1877,6 +1877,78 @@ class TestCallingRolePermissionsValidation(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("Failed to validate calling role permissions: STS failed", errors[0])
 
+    @patch("boto3.client")
+    def test_validate_calling_role_permissions_lambda_resource(self, mock_boto3_client):
+        """Test permission validation with lambda resource spec (the P449020299 fix)."""
+        mock_iam_client = MagicMock()
+        mock_sts_client = MagicMock()
+
+        mock_boto3_client.side_effect = lambda service, **kwargs: {
+            "iam": mock_iam_client,
+            "sts": mock_sts_client,
+        }[service]
+
+        mock_sts_client.get_caller_identity.return_value = {
+            "Arn": "arn:aws:sts::123456789012:assumed-role/TestRole/session",
+            "Account": "123456789012",
+        }
+        mock_iam_client.simulate_principal_policy.return_value = {
+            "EvaluationResults": [{"EvalDecision": "allowed"}]
+        }
+
+        mock_infra = MagicMock()
+        mock_infra.region = "us-west-2"
+
+        errors = []
+        required_permissions = [
+            (
+                "sagemaker:CreateTrainingJob",
+                lambda infra: f"arn:aws:sagemaker:{infra.region}:123456789012:training-job/*",
+            ),
+        ]
+
+        Validator._validate_calling_role_permissions(
+            errors, required_permissions, mock_infra, "us-west-2"
+        )
+
+        self.assertEqual(len(errors), 0)
+        mock_iam_client.simulate_principal_policy.assert_any_call(
+            PolicySourceArn="arn:aws:iam::123456789012:role/TestRole",
+            ActionNames=["sagemaker:CreateTrainingJob"],
+            ResourceArns=["arn:aws:sagemaker:us-west-2:123456789012:training-job/*"],
+        )
+
+    @patch("boto3.client")
+    def test_validate_calling_role_permissions_lambda_infra_none_raises(self, mock_boto3_client):
+        """Test that lambda resource spec with infra=None produces an error."""
+        mock_iam_client = MagicMock()
+        mock_sts_client = MagicMock()
+
+        mock_boto3_client.side_effect = lambda service, **kwargs: {
+            "iam": mock_iam_client,
+            "sts": mock_sts_client,
+        }[service]
+
+        mock_sts_client.get_caller_identity.return_value = {
+            "Arn": "arn:aws:sts::123456789012:assumed-role/TestRole/session",
+            "Account": "123456789012",
+        }
+
+        errors = []
+        required_permissions = [
+            (
+                "sagemaker:CreateTrainingJob",
+                lambda infra: f"arn:aws:sagemaker:{infra.region}:*:training-job/*",
+            ),
+        ]
+
+        Validator._validate_calling_role_permissions(
+            errors, required_permissions, None, "us-east-1"
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("runtime manager is None", errors[0])
+
 
 class TestPermissionValidationMethods(unittest.TestCase):
     """Test cases for permission validation helper methods and formats"""
@@ -2411,7 +2483,7 @@ class TestPermissionValidationMethods(unittest.TestCase):
         self.assertTrue(has_strings, "SMTJ should have string permissions")
 
     @patch("subprocess.run")
-    @patch("amzn_nova_forge.manager.runtime_manager._get_caller_account_id")
+    @patch("amzn_nova_forge.manager.runtime_manager.get_caller_account_id")
     def test_smhp_required_permissions_uses_caller_account_id(self, mock_get_account_id, mock_run):
         """Happy path: account ID from STS appears in generated ARNs."""
         mock_run.return_value.stdout = ""
@@ -2435,7 +2507,7 @@ class TestPermissionValidationMethods(unittest.TestCase):
             )
 
     @patch("subprocess.run")
-    @patch("amzn_nova_forge.manager.runtime_manager._get_caller_account_id")
+    @patch("amzn_nova_forge.manager.runtime_manager.get_caller_account_id")
     def test_smhp_required_permissions_falls_back_to_wildcard_on_sts_error(
         self, mock_get_account_id, mock_run
     ):

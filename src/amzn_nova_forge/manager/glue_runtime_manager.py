@@ -35,6 +35,7 @@ from amzn_nova_forge.manager.runtime_manager import (
     JobConfig,
     RuntimeManager,
 )
+from amzn_nova_forge.util.aws_utils import get_caller_account_id
 from amzn_nova_forge.util.logging import logger
 from amzn_nova_forge.util.s3_utils import (
     GLUE_ARTIFACT_PREFIX,
@@ -515,13 +516,44 @@ class GlueRuntimeManager(RuntimeManager):
 
         permissions.extend(
             [
-                ("glue:CreateJob", "*"),
-                ("glue:UpdateJob", "*"),
-                ("glue:StartJobRun", "*"),
-                ("glue:GetJobRun", "*"),
-                ("glue:BatchStopJobRun", "*"),
-                ("iam:GetRole", "*"),
-                ("iam:PassRole", "*"),
+                (
+                    "glue:CreateJob",
+                    lambda infra: (
+                        f"arn:aws:glue:{infra.region}:{get_caller_account_id(infra.region)}:job/*"
+                    ),
+                ),
+                (
+                    "glue:UpdateJob",
+                    lambda infra: (
+                        f"arn:aws:glue:{infra.region}:{get_caller_account_id(infra.region)}:job/*"
+                    ),
+                ),
+                (
+                    "glue:StartJobRun",
+                    lambda infra: (
+                        f"arn:aws:glue:{infra.region}:{get_caller_account_id(infra.region)}:job/*"
+                    ),
+                ),
+                (
+                    "glue:GetJobRun",
+                    lambda infra: (
+                        f"arn:aws:glue:{infra.region}:{get_caller_account_id(infra.region)}:job/*"
+                    ),
+                ),
+                (
+                    "glue:BatchStopJobRun",
+                    lambda infra: (
+                        f"arn:aws:glue:{infra.region}:{get_caller_account_id(infra.region)}:job/*"
+                    ),
+                ),
+                (
+                    "iam:GetRole",
+                    lambda infra: f"arn:aws:iam::{get_caller_account_id(infra.region)}:role/*",
+                ),
+                (
+                    "iam:PassRole",
+                    lambda infra: f"arn:aws:iam::{get_caller_account_id(infra.region)}:role/*",
+                ),
             ]
         )
 

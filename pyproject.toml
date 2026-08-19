@@ -8,7 +8,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amzn-nova-forge"
-description = "A Python SDK for customizing Amazon Nova models."
+description = "[DEPRECATED] Use sagemaker>=3.19.0 instead. A Python SDK for customizing Amazon Nova models."
+classifiers = [
+    "Development Status :: 7 - Inactive",
+]
 dynamic = ["version"]
 requires-python = ">=3.12"
 authors = [

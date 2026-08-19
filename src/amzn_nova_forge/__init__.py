@@ -11,6 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
+
+warnings.warn(
+    "amzn-nova-forge is deprecated. Please migrate to the SageMaker Python SDK V3 "
+    "(pip install 'sagemaker>=3.19.0').",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 from .core.data_mixing_config import DataMixingConfig
 from .core.enums import (
     DeploymentMode,
