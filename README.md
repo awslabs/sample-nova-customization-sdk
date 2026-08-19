@@ -14,6 +14,15 @@ A comprehensive Python SDK for fine-tuning and customizing Amazon Nova models. T
 
 The `amzn-nova-forge` package is deprecated. Amazon Nova model customization functionality is available in the SageMaker Python SDK V3.
 
+## What's Different (Summary)
+
+- Compute is a config object (`HyperPodCompute`, `TrainingJobCompute`), not a runtime manager
+- Model is a string identifier (e.g. `"nova-textgeneration-lite-v2"`), not an enum; also accepts S3 checkpoint paths for iterative training
+- Deployment uses `ModelBuilder`/`BedrockModelBuilder` pattern instead of `ForgeDeployer`
+- Overrides use full recipe paths (e.g. `"recipes.training_config.trainer.lr"`); use `trainer.get_resolved_recipe()` to inspect the final merged recipe
+- No `ForgeConfig` object — shared settings are passed directly to trainer constructors
+- Job notifications currently support SMTJ only — pass a `notifications` dict with SNS topic and EventBridge event bus ARNs
+
 ## Installation
 
 ```bash
@@ -200,8 +209,6 @@ monitor.show_logs(limit=100)
 # Stream logs (works on both trainer and evaluator)
 trainer.stream_logs()
 trainer.stream_logs(tail_logs=50)  # last 50 log entries
-
-evaluator.stream_logs()
 ```
 
 #### Metrics Visualization
@@ -485,15 +492,6 @@ trainer = SFTTrainer(
 )
 trainer.train()
 ```
-
-## What's Different (Summary)
-
-- Compute is a config object (`HyperPodCompute`, `TrainingJobCompute`), not a runtime manager
-- Model is a string identifier (e.g. `"nova-textgeneration-lite-v2"`), not an enum; also accepts S3 checkpoint paths for iterative training
-- Deployment uses `ModelBuilder`/`BedrockModelBuilder` pattern instead of `ForgeDeployer`
-- Overrides use full recipe paths (e.g. `"recipes.training_config.trainer.lr"`); use `trainer.get_resolved_recipe()` to inspect the final merged recipe
-- No `ForgeConfig` object — shared settings are passed directly to trainer constructors
-- Job notifications currently support SMTJ only — pass a `notifications` dict with SNS topic and EventBridge event bus ARNs
 
 ## Support
 
