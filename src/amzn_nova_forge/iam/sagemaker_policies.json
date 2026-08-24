@@ -74,7 +74,8 @@
         "Effect": "Allow",
         "Action": [
           "s3:GetObject",
-          "s3:ListBucket"
+          "s3:ListBucket",
+          "s3:PutObject"
         ],
         "Resource": "S3_BUCKET_PLACEHOLDER"
       }
