@@ -342,10 +342,11 @@ class Validator:
                         elif callable(resource_spec):
                             # (api_string, resource_lambda) - call lambda with infra
                             if infra is None:
-                                errors.append(
-                                    f"Cannot evaluate resource lambda for {api_string}: infra is None"
+                                raise ValueError(
+                                    f"Cannot evaluate resource ARN for {api_string}: "
+                                    "runtime manager is None. "
+                                    "Set validation_config={'iam': False} to skip IAM validation."
                                 )
-                                continue
 
                             try:
                                 resource_arn = resource_spec(infra)
